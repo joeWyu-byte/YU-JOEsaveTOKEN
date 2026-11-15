@@ -1,0 +1,13 @@
+#save-na-panel { display:block; width:100%; min-width:0; box-sizing:border-box; }
+#save-na-panel .inline-drawer-content { min-width:0; }
+#save-na-panel p { line-height:1.55; overflow-wrap:anywhere; }
+#save-na-panel .save-na-check { display:flex; flex-direction:row; align-items:center; justify-content:flex-start; gap:10px; margin:14px 0; }
+#save-na-panel .save-na-check input { flex:0 0 auto; margin:0; }
+#save-na-panel .save-na-field { display:grid; grid-template-columns:minmax(0,1fr) 80px; gap:10px; align-items:center; margin:12px 0; }
+#save-na-panel .save-na-field input { width:100%; box-sizing:border-box; }
+#save-na-panel .save-na-note { opacity:.8; font-size:.9em; }
+#save-na-panel button.save-na-button { display:block; width:100%; max-width:100%; min-width:0; height:auto; padding:10px 12px; box-sizing:border-box; white-space:normal; word-break:normal; margin:10px 0; }
+#save-na-panel pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:360px; overflow:auto; font-size:.85em; }
+#save-na-panel summary { cursor:pointer; margin:12px 0; }
+body[data-save-na-running="true"] #mes_stop { display:flex !important; }
+body[data-save-na-running="true"] #send_but { display:none !important; }

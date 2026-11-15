@@ -1,0 +1,10 @@
+{
+  "display_name": "Save · Narrative 精简版",
+  "id": "save",
+  "version": "0.2.1",
+  "author": "Yu / saveMONEYforSilly; based on Lol1p0p",
+  "description": "沿用 Narrative Agent 的 Relay → 生成 → 逐轮摘要链路，适配手机原生聊天。",
+  "loading_order": 100,
+  "js": "index.js",
+  "css": "style.css"
+}
