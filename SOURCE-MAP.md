@@ -1,6 +1,6 @@
 # 与 Narrative Agent 原版代码的对应
 
-参考来源：<https://github.com/Lol1p0p/narrative-agent>，本地 ZIP 中的 **0.2.1**。原版位于 `E:\CODEXarea\joe&yuSAVEMONEY\original\narrative-agent-master`，保持不变。
+参考来源：<https://github.com/Lol1p0p/narrative-agent>，本地 ZIP 中的 **0.2.1**。原版位于 `E:\CODEXarea\joe&yuSAVEMONEY\素材\original\narrative-agent-master`，保持不变；本版为 Save **0.2.2**。
 
 | 原版代码 | 新版代码 | 保留与修改 |
 |---|---|---|
@@ -15,7 +15,7 @@
 | `context-router.js` | 同名文件 | 保留规划/写作/分析上下文分配；移除世界书、游戏状态和工具参数，接入角色卡。 |
 | `state.js` `SummaryStore` | 同名文件/类 | **原样保留SummaryStore类**；删除RPG StateManager。 |
 | `store.js` `FileManager` | 同名文件/类 | **文件原样复制**；存储前缀由本项目constants提供，隔离原插件缓存。聊天消息extras是恢复摘要的主要来源。 |
-| `llm.js` `callLLM` | 同名文件/函数 | 保留`ctx.generateRaw({prompt:messages})`及网络错误默认一次重试；补取消检查和每次尝试的执行记录。 |
+| `llm.js` `callLLM` | 同名文件/函数，新增 `response.js`、`errors.js` | 沿用酒馆原生 raw 通道。回复读取 `generateRawData` 保留正文、模型返回的思考及签名；规划/分析使用 `generateRaw`，均不额外增加请求。保留网络失败最多一次重试；内容拦截不重试，记录具体步骤与原因。 |
 | `readers.js` | 同名文件 | 基于原读卡模块接入实际生成；新增getChatInfo，保留描述、性格、场景、示例、深度提示，不发送作者备注。 |
 | `utils.js` `extractPresetContext` | 同名函数 | 沿用预设拆分，修复顺序/启用项/主提示/宏替换读取；增加普通消息与旧标签兼容读取、摘要来源校验、swipe更新。 |
 | `parser.js` | 同名文件 | 保留JSON解析，补回原版漏读的scene_setting；裁掉事件提取和工具调用字段。 |

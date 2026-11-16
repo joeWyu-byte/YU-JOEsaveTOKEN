@@ -3,6 +3,7 @@
 import { PLACEHOLDER, MESSAGE_KEY } from './constants.js';
 import { getSTContext, getConversationId, getLatestUserInput, extractPresetContext, extractTurns, contentKey, updateSwipe } from './utils.js';
 import { setCallSession } from './llm.js';
+import { blockReasonOf } from './errors.js';
 
 const supported = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const clone = value => JSON.parse(JSON.stringify(value));
@@ -122,8 +123,21 @@ export class SillyTavernBridge {
     const setBody = text => {
       session.check(); target.mes = text; target.extra ??= {};
       delete target.extra.display_text; delete target.extra.token_count;
-      target.extra.reasoning = ''; target.extra.reasoning_duration = 0;
       updateSwipe(target); render();
+    };
+    // Clear Relay metadata once; subsequent body renders keep the actual writer response.
+    target.extra ??= {};
+    const prior = p.type === 'continue' ? p.before.at(-1)?.extra || {} : {};
+    target.extra.reasoning = prior.reasoning || '';
+    target.extra.reasoning_duration = prior.reasoning_duration || 0;
+    target.extra.reasoning_type = prior.reasoning_type || 'model';
+    target.extra.reasoning_signature = null;
+    session.onWritingResponse = response => {
+      session.check();
+      target.extra.reasoning = [prior.reasoning, response.reasoning].filter(Boolean).join('\n\n');
+      target.extra.reasoning_duration = (prior.reasoning_duration || 0) + (response.reasoning ? response.durationMs : 0);
+      target.extra.reasoning_type = response.reasoning ? response.reasoningType : prior.reasoning_type || 'model';
+      target.extra.reasoning_signature = response.reasoningSignature;
     };
     try {
       session.check();
@@ -137,7 +151,8 @@ export class SillyTavernBridge {
       const result = await this.orchestrator.pipeline(p.userInput, p.type !== 'normal', ctx.chat, { continuation:p.continuation });
       session.check();
       setBody(result.finalOutput);
-      target.extra[MESSAGE_KEY] = { schema:2, turnNum:result.turnNum, sourceKey:result.sourceKey, summaryEntries:result.summaryEntries };
+      target.extra[MESSAGE_KEY] = { schema:2, turnNum:result.turnNum, sourceKey:result.sourceKey, summaryEntries:result.summaryEntries, analysisState:result.analysisState, blockReason:result.blockReason };
+      if (p.requests.some(r => r.rawResponseUnavailable)) result.warnings.push('当前酒馆没有 generateRawData 接口，无法读取单独返回的思考字段');
       target.gen_finished = new Date().toISOString();
       updateSwipe(target);
       this.lastRun = { status:'complete', startedAt:p.started, mode:this.orchestrator.config.pipeline.enableTextRecall ? 'split' : 'merged', recentTurns:turns.length, summaries:this.orchestrator.summaryStore.getEntryCount(), requests:p.requests, warnings:result.warnings, durationMs:Date.now()-p.started };
@@ -159,8 +174,9 @@ export class SillyTavernBridge {
         updateSwipe(target); render();
         try { await ctx.saveChat?.(); } catch { /* Report the original error below. */ }
       }
-      this.lastRun = { status:session.cancelled ? 'stopped' : 'failed', requests:p.requests };
-      this.report(`本轮未完整结束：${error.message}。${draft ? '已生成的回复保留。' : ''}`);
+      const blockReason = blockReasonOf(error);
+      this.lastRun = { status:session.cancelled ? 'stopped' : blockReason ? 'blocked' : 'failed', blockReason, stage:error.stage, requests:p.requests };
+      this.report(`本轮未完整结束：${error.message}。${draft ? '已生成的回复和思考内容保留。' : ''}`);
     } finally {
       setCallSession(null); this.session = null; this.orchestrator.session = null;
       this.orchestrator.onDraft = null;

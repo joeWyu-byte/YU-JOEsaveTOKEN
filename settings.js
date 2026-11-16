@@ -21,7 +21,7 @@ export function mountSettings({ config, bridge, onConfig, getStatus }) {
   const panel = document.createElement('div');
   panel.id = 'save-na-panel'; panel.className = 'extension_container';
   panel.innerHTML = `<div class="inline-drawer">
-    <div class="inline-drawer-toggle inline-drawer-header"><b>Save · Narrative 精简版 0.2.1</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
+    <div class="inline-drawer-toggle inline-drawer-header"><b>Save · Narrative 精简版 0.2.2</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
     <div class="inline-drawer-content">
       <label class="save-na-check"><input type="checkbox" id="save-na-enabled"> 启用省 Token 接管</label>
       <p>沿用原版的短请求接管 → 回复生成 → 每轮摘要。聊天正文只显示回复。</p>
@@ -60,7 +60,7 @@ export function mountSettings({ config, bridge, onConfig, getStatus }) {
   panel.querySelector('#save-na-refresh').addEventListener('click', refresh);
   panel.querySelector('#save-na-details').addEventListener('toggle', refresh);
   panel.querySelector('#save-na-export').addEventListener('click', () => {
-    const blob = new Blob([JSON.stringify({ version:'0.2.1', ...bridge.lastRun }, null, 2)], {type:'application/json'});
+    const blob = new Blob([JSON.stringify({ version:'0.2.2', ...bridge.lastRun }, null, 2)], {type:'application/json'});
     const url = URL.createObjectURL(blob); const a = document.createElement('a');
     a.href = url; a.download = 'save-run-log.json'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   });

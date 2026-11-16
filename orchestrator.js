@@ -7,6 +7,7 @@ import { runWritingAgent, runMergedWritingAgent } from './agent-writing.js';
 import { runMergedAnalysisAgent, runHistoryAnalysisAgent } from './agent-analysis.js';
 import { DEFAULT_CONFIG, MESSAGE_KEY } from './constants.js';
 import { extractTurns, contentKey, updateSwipe, bodyOf } from './utils.js';
+import { blockReasonOf } from './errors.js';
 
 export class Orchestrator {
   constructor(deps) {
@@ -46,7 +47,7 @@ export class Orchestrator {
     const recent = this._getStableRecentTurns(cfg.recentTurnsForWriting, cfg.writingGrowthMargin);
     const recentNumbers = new Set(recent.map(t => t.turnNum));
     // Upstream analyzed turn 0. Also adopt old untagged ST messages instead of silently losing them.
-    const missing = this._turnHistory.filter(t => !t.summaryEntries.length && (t.turnNum === 0 || !recentNumbers.has(t.turnNum)));
+    const missing = this._turnHistory.filter(t => !t.summaryEntries.length && t.analysisState !== 'blocked' && (t.turnNum === 0 || !recentNumbers.has(t.turnNum)));
     const batch = [];
     let chars = 0;
     for (const turn of missing) {
@@ -75,7 +76,18 @@ export class Orchestrator {
       for (const turn of this._turnHistory) this.summaryStore.appendEntries(turn.summaryEntries);
     } catch (e) {
       this._cancelCheck();
-      this.warnings.push('历史摘要未补齐，缺失部分仍携带原文');
+      const reason = blockReasonOf(e);
+      if (reason) {
+        for (const turn of batch) {
+          const message = this._chat[turn.chatIndex];
+          if (!message || bodyOf(message) !== turn.narrativeText) continue;
+          turn.analysisState = 'blocked'; turn.blockReason = reason;
+          message.extra ??= {};
+          message.extra[MESSAGE_KEY] = { schema:2, sourceKey:turn.sourceKey, turnNum:turn.turnNum, summaryEntries:[], analysisState:'blocked', blockReason:reason };
+          updateSwipe(message);
+        }
+        this.warnings.push('历史摘要被 API 拦截（' + reason + '），同一来源不再自动重试，缺失部分保留原文');
+      } else this.warnings.push('历史摘要未补齐，缺失部分仍携带原文');
     }
   }
   async pipeline(userInput, isRegeneration = false, chat = null, options = {}) {
@@ -149,21 +161,26 @@ export class Orchestrator {
     this.onDraft?.(narrative);
     this._reportProgress('回复已生成，正在保存本轮摘要……');
     let merged = { summary_entries:[] };
+    let analysisState = 'complete', blockReason = null;
     try {
       merged = await runMergedAnalysisAgent(this.contextRouter.buildMergedAnalysisContext(narrative, userInput, turnId));
       this._cancelCheck();
       const num = Number(turnId.replace('turn_', ''));
       merged.summary_entries = merged.summary_entries.map(s => s.replace(/^\s*\[第\d+轮\]\s*/, '')).filter(Boolean);
       merged.summary_entries = merged.summary_entries.length ? [`[第${num}轮] ${merged.summary_entries.join('；')}`] : [];
-      if (!merged.summary_entries.length) this.warnings.push('本轮摘要为空，后续使用本轮原文');
+      if (!merged.summary_entries.length) { analysisState = 'empty'; this.warnings.push('本轮摘要为空，后续使用本轮原文'); }
     } catch (e) {
       this._cancelCheck();
-      this.warnings.push('本轮摘要失败，回复保留，后续使用本轮原文');
+      blockReason = blockReasonOf(e);
+      analysisState = blockReason ? 'blocked' : 'failed';
+      this.warnings.push(blockReason
+        ? '本轮摘要被 API 拦截（' + blockReason + '），不自动重试；回复、思考内容及原文保留'
+        : '本轮摘要失败，回复和思考内容保留，后续使用本轮原文');
     }
     this.summaryStore.appendEntries(merged.summary_entries);
     const previous = this._turnHistory.at(-1)?.sourceKey || '';
     const turnNum = Number(turnId.replace('turn_', ''));
-    return { narrative, finalOutput:narrative, summaryEntries:merged.summary_entries,
+    return { narrative, finalOutput:narrative, summaryEntries:merged.summary_entries, analysisState, blockReason,
       sourceKey:contentKey(previous + JSON.stringify([turnNum, userInput, narrative])) };
   }
   _extractRawTagContent(tag, targetTurns) {

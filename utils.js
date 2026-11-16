@@ -83,7 +83,9 @@ export function extractTurns(chat) {
     const legacy = msg.mes.match(/<summary>\s*([\s\S]*?)\s*<\/summary>/i)?.[1];
     const entries = saved?.schema === 2 ? (saved.sourceKey === sourceKey ? saved.summaryEntries : []) : legacy ? [legacy] : [];
     const summaryEntries = Array.isArray(entries) ? entries.filter(s => typeof s === 'string' && s.trim()) : [];
-    turns.push({ turnNum, userInput, narrativeText, chatIndex:i, sourceKey, summaryEntries });
+    const validSource = saved?.schema === 2 && saved.sourceKey === sourceKey;
+    turns.push({ turnNum, userInput, narrativeText, chatIndex:i, sourceKey, summaryEntries,
+      analysisState:validSource ? saved.analysisState : undefined, blockReason:validSource ? saved.blockReason : undefined });
     previous = sourceKey; pending = [];
   }
   return turns;
