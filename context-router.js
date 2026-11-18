@@ -6,6 +6,7 @@ export class ContextRouter {
       systemEntries:[await this.characterReader.getChatInfo()], beforeCharEntries:[], selectiveEntries:[],
       userPersona:this.userPersonaReader.getPersonaInfo(), storySummaries, recentTurns, userInput,
       presetContext:presetContext?.planningContext || '',
+      presetMessages:presetContext?.messages,
     };
   }
   async buildWritingContext(writingGuide, userInput, recentNarratives, preset, textRecall = null) {
@@ -13,6 +14,7 @@ export class ContextRouter {
       userPersona:this.userPersonaReader.getPersonaInfo(), writingGuide, recentNarratives,
       systemEntries:[await this.characterReader.getChatInfo()], beforeCharEntries:[], selectiveEntries:[],
       writingSystemPreset:preset?.writingSystemContext || '', writingUserPreset:preset?.writingUserContext || '',
+      presetMessages:preset?.messages,
       userInput, textRecall, toolResultsText:'',
     };
   }

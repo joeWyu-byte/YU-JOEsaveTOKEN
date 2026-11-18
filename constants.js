@@ -6,6 +6,7 @@ export const MESSAGE_KEY = 'save_na';
 export const DEFAULT_CONFIG = {
   enabled: true,
   presetMode: 'split',
+  timeouts: { relayMs:60000, requestMs:180000, analysisMs:90000, saveMs:10000 },
   pipeline: {
     recentTurnsForPlanning: 4,
     planningGrowthMargin: 5,

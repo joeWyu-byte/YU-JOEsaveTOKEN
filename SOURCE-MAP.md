@@ -1,6 +1,6 @@
 # 与 Narrative Agent 原版代码的对应
 
-参考来源：<https://github.com/Lol1p0p/narrative-agent>，本地 ZIP 中的 **0.2.1**。原版位于 `E:\CODEXarea\joe&yuSAVEMONEY\素材\original\narrative-agent-master`，保持不变；本版为 Save **0.2.2**。
+参考来源：<https://github.com/Lol1p0p/narrative-agent>，本地 ZIP 中的 **0.2.1**。原版位于 `E:\CODEXarea\joe&yuSAVEMONEY\素材\original\narrative-agent-master`，保持不变；本版为 Save **0.2.3**。
 
 | 原版代码 | 新版代码 | 保留与修改 |
 |---|---|---|
@@ -26,3 +26,6 @@
 原版“完整链路失败再重新生成一次回复”的额外降级流程未保留，避免已经完成的回复在摘要失败后再次生成并计费。本版仍保留原网络重试规则；摘要失败保留回复和原文，不伪造摘要。
 
 验证代码见 `tests/upstream.test.mjs`、`tests/pipeline.test.mjs`；实际浏览器请求明细见 `tests/evidence/mock-requests.json`。`UPSTREAM-PROVENANCE.json` 记录原版与当前文件哈希，区分逐字保留与裁剪重写的部分。
+
+
+0.2.3 新增 lifecycle.js（等待上限与取消）、persistence.js（原生保存顺序、只读确认及未保存备份）；bridge.js 保留 Relay 事件路径并修复流式生成标志和首笔失败记录。utils.js / agent-writing.js / context-router.js 保留预设消息角色、已识别的原生静态注入和命名示例。原版 n+m 方法和 SummaryStore 保持不变。真实服务商内容拦截依然如实报告，不自动绕过。

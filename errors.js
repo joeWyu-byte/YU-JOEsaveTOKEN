@@ -8,6 +8,17 @@ export class ProviderBlockedError extends Error {
     this.cause = cause;
   }
 }
+export class StageTimeoutError extends Error {
+  constructor(stage, timeoutMs) {
+    super(`${stage} 超时（${Math.round(timeoutMs / 1000)}秒）`);
+    this.name = 'StageTimeoutError'; this.stage = stage; this.code = 'stage-timeout';
+  }
+}
+export class PipelineCancelledError extends Error {
+  constructor(message = 'Pipeline cancelled') {
+    super(message); this.name = 'PipelineCancelledError'; this.code = 'cancelled';
+  }
+}
 export function blockReasonOf(value) {
   if (value?.blockReason) return String(value.blockReason);
   const feedback = value?.promptFeedback || value?.prompt_feedback || value?.error?.promptFeedback;
@@ -22,5 +33,5 @@ export function blockReasonOf(value) {
 export function isProviderBlocked(error) { return !!blockReasonOf(error); }
 export function describeFailure(error, stage) {
   const reason = blockReasonOf(error);
-  return reason ? { code:'provider-blocked', blockReason:reason, stage } : { code:'request-failed', stage };
+  return reason ? { code:'provider-blocked', blockReason:reason, stage } : { code:error?.code || 'request-failed', stage };
 }

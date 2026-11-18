@@ -47,7 +47,7 @@ export class Orchestrator {
     const recent = this._getStableRecentTurns(cfg.recentTurnsForWriting, cfg.writingGrowthMargin);
     const recentNumbers = new Set(recent.map(t => t.turnNum));
     // Upstream analyzed turn 0. Also adopt old untagged ST messages instead of silently losing them.
-    const missing = this._turnHistory.filter(t => !t.summaryEntries.length && t.analysisState !== 'blocked' && (t.turnNum === 0 || !recentNumbers.has(t.turnNum)));
+    const missing = this._turnHistory.filter(t => !t.summaryEntries.length && !['blocked','timed-out'].includes(t.analysisState) && (t.turnNum === 0 || !recentNumbers.has(t.turnNum)));
     const batch = [];
     let chars = 0;
     for (const turn of missing) {
@@ -131,6 +131,7 @@ export class Orchestrator {
       userPersona:this.userPersonaReader.getPersonaInfo(),
       presetContext:this.presetContext?.writingSystemContext || '',
       writingUserPreset:this.presetContext?.writingUserContext || '',
+      presetMessages:this.presetContext?.messages,
     });
     return this._finishTurn(userInput, narrativeText, turnId);
   }
@@ -158,7 +159,11 @@ export class Orchestrator {
     const clean = generated.replace(/<summary>[\s\S]*?<\/summary>/gi, '').replace(/^\s*<context>\s*([\s\S]*?)\s*<\/context>\s*$/i, '$1').trim();
     if (!clean) throw new Error('生成正文为空');
     const narrative = this.continuation ? this.continuation + '\n' + clean : clean;
-    this.onDraft?.(narrative);
+    const previous = this._turnHistory.at(-1)?.sourceKey || '';
+    const turnNum = Number(turnId.replace('turn_', ''));
+    const sourceKey = contentKey(previous + JSON.stringify([turnNum, userInput, narrative]));
+    await this.onDraft?.(narrative, {turnNum,sourceKey});
+    this._cancelCheck();
     this._reportProgress('回复已生成，正在保存本轮摘要……');
     let merged = { summary_entries:[] };
     let analysisState = 'complete', blockReason = null;
@@ -172,16 +177,14 @@ export class Orchestrator {
     } catch (e) {
       this._cancelCheck();
       blockReason = blockReasonOf(e);
-      analysisState = blockReason ? 'blocked' : 'failed';
+      analysisState = blockReason ? 'blocked' : e.code === 'stage-timeout' ? 'timed-out' : 'failed';
       this.warnings.push(blockReason
         ? '本轮摘要被 API 拦截（' + blockReason + '），不自动重试；回复、思考内容及原文保留'
         : '本轮摘要失败，回复和思考内容保留，后续使用本轮原文');
     }
     this.summaryStore.appendEntries(merged.summary_entries);
-    const previous = this._turnHistory.at(-1)?.sourceKey || '';
-    const turnNum = Number(turnId.replace('turn_', ''));
     return { narrative, finalOutput:narrative, summaryEntries:merged.summary_entries, analysisState, blockReason,
-      sourceKey:contentKey(previous + JSON.stringify([turnNum, userInput, narrative])) };
+      sourceKey };
   }
   _extractRawTagContent(tag, targetTurns) {
     return this._turnHistory.filter(t => targetTurns.slice(0, 5).includes(t.turnNum))

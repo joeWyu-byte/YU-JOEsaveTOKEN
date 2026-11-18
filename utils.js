@@ -21,7 +21,7 @@ export function getLatestUserInput(chat) {
   const parts = [];
   let found = false;
   for (let i = (chat?.length || 0) - 1; i >= 0; i--) {
-    if (chat[i]?.is_system) continue;
+    if (chat[i]?.is_system || chat[i]?.extra?.[MESSAGE_KEY]?.failed) continue;
     if (chat[i]?.is_user) { parts.unshift(chat[i].mes || ''); found = true; }
     else if (found) break;
   }
@@ -33,7 +33,7 @@ export function substitute(text) {
 }
 
 /** Derived from original extractPresetContext, fixing enabled order, main prompt and macros. */
-export function extractPresetContext() {
+export function extractPresetContext(nativeMessages = []) {
   const ctx = getSTContext();
   const settings = ctx?.chatCompletionSettings || {};
   const orders = settings.prompt_order || [];
@@ -42,19 +42,31 @@ export function extractPresetContext() {
   const prompts = settings.prompts || [];
   const selected = order ? order.filter(p => p.enabled !== false).map(p => prompts.find(x => x.identifier === p.identifier)).filter(Boolean) : prompts.filter(p => p.enabled !== false);
   const fields = ctx?.getCharacterCardFields?.() || {};
-  const system = [], user = [], seen = new Set();
+  const system = [], user = [], messages = [];
   for (const prompt of selected) {
     if (prompt.marker) continue;
     let value = prompt.content || '';
     if (prompt.identifier === 'main' && fields.system) value = fields.system;
     if (prompt.identifier === 'jailbreak' && fields.jailbreak) value = fields.jailbreak;
     value = substitute(value).trim();
-    if (!value || seen.has(value)) continue;
-    seen.add(value);
-    (prompt.role === 'system' || !prompt.role ? system : user).push(value);
+    if (!value) continue;
+    const role = ['system','user','assistant','developer'].includes(prompt.role) ? prompt.role : 'system';
+    messages.push({role,content:value,...(prompt.name ? {name:prompt.name} : {})});
+    (role === 'system' || role === 'developer' ? system : user).push(value);
   }
-  // CharacterReader supplies the actual card fields; these are not read from creator notes.
-  return { planningContext: system.join('\n\n'), writingSystemContext: system.join('\n\n'), writingUserContext: user.join('\n\n') };
+  // Preserve native static system injections (including active world info / author notes),
+  // selected non-system presets and named examples. Never copy ordinary raw chat history.
+  const native = nativeMessages.filter(m => typeof m.content === 'string' && (
+    ['system','developer'].includes(m.role) || /^example[_-]/i.test(m.name || '')
+    || messages.some(p => p.role === m.role && p.content === m.content.trim())
+  )).map(m => ({role:m.role,content:m.content,...(m.name ? {name:m.name} : {})}));
+  const ordered = native.length ? native : messages;
+  if (native.length) for (const message of messages) {
+    if (!ordered.some(m => m.role === message.role && m.content.includes(message.content))) ordered.push(message);
+  }
+  // CharacterReader also supplies card fields as in the original pipeline.
+  return { messages:ordered, source:native.length ? 'native-static-and-presets' : 'presets',
+    planningContext: system.join('\n\n'), writingSystemContext: system.join('\n\n'), writingUserContext: user.join('\n\n') };
 }
 // Change detector, not a security hash; works on HTTP mobile clients without crypto.subtle.
 export function contentKey(text) {

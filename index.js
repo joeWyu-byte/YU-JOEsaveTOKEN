@@ -2,8 +2,8 @@ import { SummaryStore } from './state.js';
 import { FileManager } from './store.js';
 import { CharacterReader, UserPersonaReader } from './readers.js';
 import { Orchestrator } from './orchestrator.js';
-import { SillyTavernBridge } from './bridge.js?v=0.2.2';
-import { loadConfig, mountSettings } from './settings.js?v=0.2.2';
+import { SillyTavernBridge } from './bridge.js?v=0.2.3';
+import { loadConfig, mountSettings } from './settings.js?v=0.2.3';
 import { getSTContext, getConversationId } from './utils.js';
 
 export async function initExtension() {
@@ -29,7 +29,7 @@ export async function initExtension() {
     if (!next.enabled) bridge.cancel();
     status = next.enabled ? '已启用原版接管链路，等待下一次回复。' : '已停用；下次回复使用酒馆原生请求。';
   } });
-  const api = { version:'0.2.2', bridge, orchestrator };
+  const api = { version:'0.2.3', bridge, orchestrator };
   globalThis.SaveNarrativeLite = api;
   return api;
 }

@@ -1,7 +1,7 @@
 {
   "upstream": "Lol1p0p/narrative-agent",
   "localVersion": "0.2.1",
-  "forkVersion": "0.2.2",
+  "forkVersion": "0.2.3",
   "stableWindowMethodUnchanged": true,
   "files": [
     {
@@ -12,67 +12,73 @@
     },
     {
       "name": "agent-planning.js",
-      "currentSha256": "0b736f73203123b62570c6689208e34b11891f2b977c7b5471ca76ba489a68ef",
+      "currentSha256": "5c3b793776efe7918d3cc214507a798cf14a684a69e5a09094cf8edeb4a7ea95",
       "upstreamSha256": "7af8ed0a3bcfcbeee1195c57cddbf3da975f595c375511c249471e633d938d36",
       "byteIdentical": false
     },
     {
       "name": "agent-writing.js",
-      "currentSha256": "bc3a90c9df0e12d4a68bdae6c2f1678d8724fbbc188a64c776691b53e905f2b4",
+      "currentSha256": "1d191ee02f93ffe9b7cd669a90d3e75d6414f7a12dd6effd0c04cfd0c22717d6",
       "upstreamSha256": "5a6c8b1b7c55e3aabe7e359f99392ab7be460a1a271a0a0e792e4e22475d6b6f",
       "byteIdentical": false
     },
     {
       "name": "bridge.js",
-      "currentSha256": "04977afb99c2d5c79d1d24ef148ee9cf920248ad7bb713d9cce1c55ab80f97e6",
+      "currentSha256": "0a320508f72816cbc0a1a8d41aef3efc3266cf0381a1f13bc6a202b29e1ec717",
       "upstreamSha256": "5f007eb0be60f4c1fb140869c16b68928f86d74d68f82f26cb82fb3acd92cf39",
       "byteIdentical": false
     },
     {
       "name": "constants.js",
-      "currentSha256": "523650cc4f951a18fb9974a59e0a35b41c59221f8bd630e1da17d68f9d5628cf",
+      "currentSha256": "271c36d13ebcf3fd46506fec3e825205b00859b3e487b76a7ec381f69ebedd24",
       "upstreamSha256": "31baca4168628adefd9fd28d288b30a83c630e3f3dc5e36c0e712bb99fe3a23f",
       "byteIdentical": false
     },
     {
       "name": "context-router.js",
-      "currentSha256": "8a1b77fb82eada9ab7086081b7a528619758a0a22084dcc0c0d7abdbf0270e4f",
+      "currentSha256": "1d506f9f6d8b5e2522f7872ff16085525dff0163333fa1abf0e1012cca7eba9f",
       "upstreamSha256": "f1cce973f2f7d95285d163a450505d8f41cbd9977f0c8013550c76f0cdbb3569",
       "byteIdentical": false
     },
     {
       "name": "errors.js",
-      "currentSha256": "cdf110ce717c5070e3811309b9ab7d91dd1906fb7d891fa6cafaa0ba10668640",
+      "currentSha256": "77139f4c95f824e04d34a56dc5927806bb2acda86cd1c588735d3dcd5cfb500c",
       "upstreamSha256": null,
       "byteIdentical": false
     },
     {
       "name": "index.js",
-      "currentSha256": "8f5893d1f11d24c42ac90835d3985c5ab0ab39f894791fbb9b0475dbe1d3c0e0",
+      "currentSha256": "6bae26ba64c9765b1419b0d9890bf43b18ec92b51650955faf99a36c66541ae6",
       "upstreamSha256": "134a7f77a704d18dd56b675d8fe28a11fa2e5dcba2a58273fbe0e4d182290c03",
       "byteIdentical": false
     },
     {
+      "name": "lifecycle.js",
+      "currentSha256": "0ac600a54911f63fa7abc666aba6fd7acbe7dcecca143d8279afc064fe3159cf",
+      "upstreamSha256": null,
+      "byteIdentical": false
+    },
+    {
       "name": "llm.js",
-      "currentSha256": "a93165dc390aac8dd8cf678e600283f5c78c68fddcaa8dbe5657809fc768f99b",
+      "currentSha256": "72a4c384f218ccc368061ae6bf51116dd4248dcca91e57a39947f59dca901e56",
       "upstreamSha256": "ee54f2fe76616a777f497eae357b26ed16050d4a103c1d495a83ad899a31e5c0",
       "byteIdentical": false
     },
     {
       "name": "manifest.json",
-      "currentSha256": "8f0c309ee44b0126efdb1d85a03ce2384d94120ae0262600d4e6bbc08a7f2ba2",
+      "currentSha256": "03af89c3ca0a3f60980942c0088c28b9575a82b0e67ced7756f7918a7c19e45b",
       "upstreamSha256": "2bd17c7ce2649f6a45f90f1f21dc09fae572d4e8f6735df10371764f65bdcabb",
       "byteIdentical": false
     },
     {
       "name": "orchestrator.js",
-      "currentSha256": "1bf0906a8c134e85deeee5044bdc9738d3975dd2eccd5f6a00711959dc2e1fc1",
+      "currentSha256": "855d3d56e229f5a6afae3d50f97a0f8b308098973ed66a3bf1c54a472273eb8d",
       "upstreamSha256": "78d8e0e020cc4c6efabee8db8dd16be5c31e8009153a5619ae401985afa84df0",
       "byteIdentical": false
     },
     {
       "name": "package.json",
-      "currentSha256": "8ff5a65942ca26b5f7e08de053125d2a96fc545e861b24a29b15814da42e6939",
+      "currentSha256": "0d26d31e3b120716d6adaa681fbf46df41c760b1d0b277a073018b4912c49d06",
       "upstreamSha256": null,
       "byteIdentical": false
     },
@@ -80,6 +86,12 @@
       "name": "parser.js",
       "currentSha256": "57daea7899a33f0c9ca07570faf30d4aeacd12d0e00b6b49ba4b2130986a8101",
       "upstreamSha256": "d62d49d4909f1b8afa35a2821328dffb70a0f694b8b695565b1196e376cd6be5",
+      "byteIdentical": false
+    },
+    {
+      "name": "persistence.js",
+      "currentSha256": "f68b743ee0979cdbd6925f3149f6c4118e85f325c6bdf761ae36747494b1429c",
+      "upstreamSha256": null,
       "byteIdentical": false
     },
     {
@@ -96,7 +108,7 @@
     },
     {
       "name": "settings.js",
-      "currentSha256": "42c7deb0a7ddf263902c7e43c40a7e2f9cf6d178892db431696027f7d71ec726",
+      "currentSha256": "038097aa6802a598faa456ead512b011e4ec0180879c4731320086f8204b2076",
       "upstreamSha256": "6d90e10ef6601a4d30d016ffa59e0a2af59e8ec0193173b6a678d3c38a0be1bf",
       "byteIdentical": false
     },
@@ -120,7 +132,7 @@
     },
     {
       "name": "utils.js",
-      "currentSha256": "475292693b5f0db526a4df4dd8d2b4b840c3b90cab11843625a439ab48afdff9",
+      "currentSha256": "b204f2e19ac8ea7d553d468d092939c0338ee4d148e286671954f0ca08b2d5d1",
       "upstreamSha256": "3ff59e7287a1d432c2031576ef52617408b8b36b1cb9409ea04b78ffd89f24d6",
       "byteIdentical": false
     }
