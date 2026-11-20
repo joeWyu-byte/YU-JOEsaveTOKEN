@@ -1,10 +1,11 @@
 {
-  "display_name": "Save · 原版源码裁剪版",
-  "id": "save",
-  "version": "0.3.0",
-  "author": "Yu; based on Lol1p0p",
-  "description": "原版生成流程、后台逐轮摘要、手机原生正文显示。",
-  "loading_order": 100,
-  "js": "index.js",
-  "css": "style.css"
+    "display_name": "Save · 原版最小补丁",
+    "id": "narrative-agent",
+    "api": 2,
+    "version": "0.4.0",
+    "description": "基于 Narrative Agent 原版：隐藏末尾摘要显示，不读取世界书，保留角色卡。",
+    "author": "Lol1p0p；按 Yu 的需求定制",
+    "tags": ["agent", "narrative", "pipeline"],
+    "js": "index.js",
+    "css": "style.css"
 }

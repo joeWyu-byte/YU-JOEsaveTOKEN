@@ -25,6 +25,10 @@ export async function runPlanningAgent(ctx) {
   if (systemContent) systemContent += "\n\n";
   systemContent += PLANNING_SYSTEM_SUFFIX;
 
+  if (ctx.toolListText) {
+    systemContent += "\n\n" + ctx.toolListText;
+  }
+
   let userContent = "";
   if (ctx.beforeCharEntries && ctx.beforeCharEntries.length > 0) {
     userContent += "<worldinfo2>\n" + ctx.beforeCharEntries.join("\n\n") + "\n</worldinfo2>\n\n";
@@ -37,6 +41,7 @@ export async function runPlanningAgent(ctx) {
   if (ctx.selectiveEntries && ctx.selectiveEntries.length > 0) {
     userContent += "\n\n<worldinfo3>\n" + ctx.selectiveEntries.join("\n\n") + "\n</worldinfo3>";
   }
+  userContent += `\n\n<state_summary>\n${ctx.stateSummary}\n</state_summary>`;
   userContent += `\n\n<user_input>\n${ctx.userInput}\n</user_input>`;
   userContent += "\n\n\u8bf7\u751f\u6210\u5199\u4f5c\u6307\u5bfc\u3002";
 

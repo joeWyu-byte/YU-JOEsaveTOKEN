@@ -1,22 +1,7 @@
-import { truncate, getSTContext, substitute } from "./utils.js";
+import { truncate, getSTContext } from "./utils.js";
 
 export class CharacterReader {
   constructor() { this._cache = null; this._cacheId = null; this._fullCache = null; this._fullCacheId = null; }
-
-  // Upstream instantiated this reader without connecting card content to generation.
-  async getChatInfo() {
-    const ctx = getSTContext();
-    const card = await this._getFullCard();
-    const fields = ctx?.getCharacterCardFields?.() || {};
-    const data = card?.data || card || {};
-    const get = (name, field = name) => fields[name] ?? data[field] ?? card?.[field] ?? '';
-    const parts = [`【角色名】${ctx?.name2 || this.getName()}`];
-    for (const [label, text] of [
-      ['角色描述',get('description')], ['性格',get('personality')], ['场景',get('scenario')],
-      ['对话示例',get('mesExamples','mes_example')], ['角色深度提示',get('charDepthPrompt')],
-    ]) if (text) parts.push(`【${label}】\n${substitute(text)}`);
-    return parts.join('\n\n');
-  }
 
   _getCard() {
     const ctx = getSTContext();

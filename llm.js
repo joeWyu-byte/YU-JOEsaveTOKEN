@@ -1,92 +1,55 @@
-// Narrative Agent raw-generation route; preserve response metadata and classify failures.
-import { getSTContext } from './utils.js';
-import { decodeWritingResponse, extractText, canReadNativeData } from './response.js';
-import { ProviderBlockedError, blockReasonOf, isProviderBlocked, describeFailure } from './errors.js';
-import { bounded, deadlineFor } from './lifecycle.js';
-export { extractText } from './response.js';
-let activeSession = null;
-export function setCallSession(session) { activeSession = session; }
-export async function callLLM(messages, options = {}) {
-  const session = activeSession;
-  const maxRetries = options.retries ?? 1;
-  const stage = options.label || 'raw';
-  const isWriting = stage === 'writing' || stage === 'merged-writing';
-  let lastErr;
+import { getSTContext } from "./utils.js";
+
+let llmCallCount = 0;
+
+export async function callLLM(messages, options) {
+  llmCallCount++;
+  const label = (options && options.label) || `call_${llmCallCount}`;
+  const maxRetries = (options && options.retries) || 1;
+
+  let lastErr = null;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    session?.check();
-    const record = { stage, attempt:attempt + 1, status:'pending', startedAt:Date.now(), inputChars:JSON.stringify(messages).length,
-      messageRoles:messages.map(m => m.role) };
-    session?.requests.push(record);
-    if (session) { session.activeRequest = record; session.onUpdate?.(stage); }
-    const started = Date.now();
-    let accepting = true;
     try {
+      if (attempt > 0) console.log(`[LLMClient] ${label} \u91cd\u8bd5 ${attempt}/${maxRetries}`);
+      console.log(`[LLMClient] ${label} \u8c03\u7528, messages \u6570\u91cf:`, messages.length);
       const ctx = getSTContext();
-      if (!ctx?.generateRaw) throw new Error('当前酒馆没有 generateRaw 接口');
-      if(messages.length!==2 || messages[0].role!=='system' || messages[1].role!=='user')throw new Error('Save 请求结构校验失败，未发送请求');
-      const execute = async () => {
-      let text;
-      if(isWriting && session) {
-        if((session.writerAttempts || 0)>=3)throw Object.assign(new Error('本轮正文请求达到恢复上限'),{code:'request-budget'});
-        session.writerAttempts=(session.writerAttempts || 0)+1;
+      if (!ctx) throw new Error("SillyTavern context not available");
+      const result = await ctx.generateRaw({ prompt: messages });
+      const text = extractText(result);
+      if (!text || (typeof text === "string" && text.trim().length === 0)) {
+        throw new Error("[LLMClient] generateRaw \u8fd4\u56de\u7a7a\u5185\u5bb9\uff0c\u8bf7\u6c42\u53ef\u80fd\u88ab\u53d6\u6d88\u6216API\u9519\u8bef");
       }
-      if (isWriting && typeof ctx.generateRawData === 'function' && await canReadNativeData(ctx)) {
-        const data = await ctx.generateRawData({ prompt:messages });
-        if (!accepting) throw new Error('Pipeline cancelled');
-        session?.check();
-        const reason = blockReasonOf(data);
-        if (reason) throw new ProviderBlockedError(reason, stage);
-        if (data?.error) throw new Error(data.error.message || 'API returned an error');
-        const decoded = await decodeWritingResponse(data, Date.now() - started, ctx);
-        if (!accepting) throw new Error('Pipeline cancelled');
-        session?.check();
-        text = decoded.text;
-        session?.onWritingResponse?.(decoded);
-        record.reasoningReturned = !!decoded.reasoning;
-      } else {
-        const result = await ctx.generateRaw({ prompt:messages });
-        if (!accepting) throw new Error('Pipeline cancelled');
-        const reason = typeof result === 'object' ? blockReasonOf(result) : null;
-        if (reason) throw new ProviderBlockedError(reason, stage);
-        text = extractText(result);
-        if (isWriting) {
-          const decoded = await decodeWritingResponse(text, Date.now() - started, ctx);
-          if (!accepting) throw new Error('Pipeline cancelled');
-          session?.check();
-          text = decoded.text; session?.onWritingResponse?.(decoded);
-          record.rawResponseUnavailable = true;
-        }
-      }
-      session?.check();
-      if (!text?.trim()) throw new Error('API 返回空内容');
+      console.log(`[LLMClient] ${label} \u8fd4\u56de, \u957f\u5ea6:`, text.length);
       return text;
-      };
-      const text = await bounded(execute, { stage, timeoutMs:deadlineFor(session?.config, stage), signal:session?.controller?.signal,
-        onTimeout:() => { accepting = false; session?.abortNative?.(); } });
-      record.status = 'complete'; record.outputChars = text.length;
-      record.durationMs = Date.now() - started;
-      return text;
-    } catch (e) {
-      const reason = blockReasonOf(e);
-      lastErr = reason ? new ProviderBlockedError(reason, stage, e) : e;
-      record.status = reason ? 'blocked' : e?.code === 'stage-timeout' ? 'timed-out' : e?.code === 'cancelled' ? 'cancelled' : 'failed';
-      Object.assign(record, describeFailure(lastErr, stage));
-      record.durationMs = Date.now() - started;
-      session?.check();
-      if (isAbortError(e)) throw new Error('Pipeline cancelled');
-      // A provider block is terminal. Never change safety settings or reword and resend.
-      if (reason || e?.code === 'stage-timeout' || !isRetryable(e) || (isWriting && session?.writerAttempts>=3)) break;
-      await bounded(() => new Promise(resolve => setTimeout(resolve, 350)), { stage:'retry-delay', timeoutMs:1000, signal:session?.controller?.signal });
-    } finally {
-      accepting = false;
-      if (session?.activeRequest === record) session.activeRequest = null;
-      session?.onUpdate?.(stage);
+    } catch (err) {
+      lastErr = err;
+      if (isAbortError(err)) throw new Error("Pipeline cancelled");
+      if (!isRetryable(err)) break;
     }
   }
-  throw lastErr;
+  console.error(`[LLMClient] ${label} \u5931\u8d25:`, lastErr);
+  throw lastErr || new Error(`[LLMClient] ${label} failed`);
 }
-export function isAbortError(err) { return /abort|cancel|中断/i.test(err?.message || ''); }
+
+export function extractText(result) {
+  if (typeof result === "string") return result;
+  if (result && typeof result === "object") {
+    if (result.choices?.[0]?.message?.content) return result.choices[0].message.content;
+    if (result.message?.content) return result.message.content;
+  }
+  return String(result || "");
+}
+
+export function isAbortError(err) {
+  const msg = (err && err.message) || "";
+  return msg.includes("abort") || msg.includes("Abort") || msg.includes("Cancelled by stop");
+}
+
 export function isRetryable(err) {
-  if (isProviderBlocked(err)) return false;
-  return /\b429\b|\b5\d{2}\b|\bECONN\w*|fetch failed|NetworkError|network (?:error|failure)|timeout|timed out|rate[_ -]?limit(?:ed)?/i.test(err?.message || '');
+  const msg = (err && err.message) || "";
+  if (msg.includes("fetch") || msg.includes("network") || msg.includes("ECONN")) return true;
+  if (msg.includes("timeout") || msg.includes("ETIMEDOUT")) return true;
+  if (msg.includes("429") || msg.includes("rate")) return true;
+  if (/\b5\d{2}\b/.test(msg)) return true;
+  return false;
 }

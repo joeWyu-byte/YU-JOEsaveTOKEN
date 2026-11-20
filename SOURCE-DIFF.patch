@@ -1,0 +1,251 @@
+--- a/bridge.js
++++ b/bridge.js
+@@ -1,5 +1,6 @@
+ import { getSTContext, extractPresetContext, getLatestUserInput, isApiFailure } from "./utils.js";
+ import { PLACEHOLDER } from "./constants.js";
++import { applySummaryDisplay } from "./save-custom.js";
+ 
+ export class SillyTavernBridge {
+   constructor(orchestrator) {
+@@ -146,6 +147,7 @@
+         const msg = chat[lastMsgIndex];
+         if (msg && !msg.is_user) {
+           msg.mes = status;
++          applySummaryDisplay(msg);
+           try { ctx.updateMessageBlock(lastMsgIndex, msg); } catch (e) { /* ignore */ }
+         }
+       });
+@@ -158,6 +160,7 @@
+         lastMsg.extra.state_panel = null;
+         lastMsg.extra.writing_guide = result.writingGuide;
+         lastMsg.extra.events = result.events;
++        applySummaryDisplay(lastMsg);
+         ctx.updateMessageBlock(chat.length - 1, lastMsg);
+       }
+ 
+@@ -181,6 +184,7 @@
+         } else {
+           lastMsg.mes = "工作流执行异常，请检查控制台日志。";
+         }
++        applySummaryDisplay(lastMsg);
+         ctx.updateMessageBlock(chat.length - 1, lastMsg);
+       }
+       try { ctx.eventSource.emit(ctx.eventTypes.MESSAGE_EDITED, chat.length - 1); } catch {}
+@@ -197,4 +201,4 @@
+       this.isPipelineRunning = false;
+     }
+   }
+-}
+\ No newline at end of file
++}
+--- a/index.js
++++ b/index.js
+@@ -2,7 +2,7 @@
+ import { StateManager, SummaryStore } from "./state.js";
+ import { FileManager } from "./store.js";
+ import { CharacterReader, UserPersonaReader } from "./readers.js";
+-import { WorldInfoResolver } from "./worldbook.js";
++import { WorldInfoResolver, installSummaryDisplay, renderLocalSettings } from "./save-custom.js";
+ import { Orchestrator } from "./orchestrator.js";
+ import { SillyTavernBridge } from "./bridge.js";
+ import { loadConfig, saveConfig, loadOrCreateState, loadOrCreateSummary, persistState } from "./settings.js";
+@@ -16,6 +16,7 @@
+ async function initExtension() {
+   console.log("[NarrativeAgent] Initializing...");
+   config = loadConfig();
++  installSummaryDisplay();
+ 
+   currentChatId = getConversationId();
+   const stateManager = loadOrCreateState(currentChatId);
+@@ -111,9 +112,7 @@
+ async function registerSettingsPane() {
+   try {
+     const ctx = getSTContext();
+-    if (!ctx?.renderExtensionTemplateAsync) { console.warn("[NarrativeAgent] renderExtensionTemplateAsync not available"); return; }
+-
+-    const html = await ctx.renderExtensionTemplateAsync("third-party/narrative-agent", "settings");
++    const html = await renderLocalSettings(ctx);
+     const $html = $(html);
+ 
+     $html.find("#na_enabled").prop("checked", config.enabled);
+@@ -249,7 +248,7 @@
+     });
+ 
+     $html.find("#na_open_tutorial").on("click", function () {
+-      window.open("/scripts/extensions/third-party/narrative-agent/TUTORIAL.html", "_blank");
++      window.open(new URL('./TUTORIAL.html', import.meta.url).href, "_blank");
+     });
+ 
+     $("#extensions_settings").append($html);
+@@ -280,4 +279,4 @@
+       if (typeof $ !== "undefined") { clearInterval(interval); $(bootstrap); }
+     }, 100);
+   }
+-})();
+\ No newline at end of file
++})();
+--- a/manifest.json
++++ b/manifest.json
+@@ -1,10 +1,10 @@
+ {
+-    "display_name": "Narrative Agent",
++    "display_name": "Save · 原版最小补丁",
+     "id": "narrative-agent",
+     "api": 2,
+-    "version": "0.2.1",
+-    "description": "多Agent叙事系统v0.2.1：规划/工具执行/写作/合并分析",
+-    "author": "Lol1p0p",
++    "version": "0.4.0",
++    "description": "基于 Narrative Agent 原版：隐藏末尾摘要显示，不读取世界书，保留角色卡。",
++    "author": "Lol1p0p；按 Yu 的需求定制",
+     "tags": ["agent", "narrative", "pipeline"],
+     "js": "index.js",
+     "css": "style.css"
+--- a/settings.html
++++ b/settings.html
+@@ -1,11 +1,11 @@
+ <div id="narrative_agent_settings">
+     <div class="inline-drawer">
+         <div class="inline-drawer-toggle inline-drawer-header">
+-            <b>Narrative Agent</b>
++            <b>Save 0.4.0 · 原版最小补丁</b>
+             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+         </div>
+         <div class="inline-drawer-content">
+-            <input type="button" class="menu_button" id="na_open_tutorial" value="查看教程">
++            <input type="button" class="menu_button" id="na_open_tutorial" value="查看原版教程">
+ 
+             <label class="checkbox_label">
+                 <input type="checkbox" id="na_enabled" name="na_enabled">
+@@ -28,16 +28,8 @@
+ 
+             <hr>
+ 
+-            <h4>世界书来源</h4>
+-            <div class="flex-container">
+-                <label>来源:</label>
+-                <select id="na_worldbook_source" style="width: 200px;">
+-                    <option value="auto">自动（优先卡包内嵌，回退到世界书库）</option>
+-                    <option value="card">卡包内嵌（character_book）</option>
+-                    <option value="world">世界书库（按名称加载）</option>
+-                </select>
+-            </div>
+-            <small>选择世界书条目的加载来源。卡包内嵌模式适用于已通过 narrative-agent-worldbook skill 规范化并嵌入卡包的世界书。</small>
++            <h4>本次定制</h4>
++            <small>不读取角色卡内嵌及外部世界书。角色卡和用户设定保留；回复末尾的轮次、用户意图、叙事要点仅隐藏显示，后台摘要照常保存和使用。</small>
+ 
+             <hr>
+ 
+@@ -62,7 +54,6 @@
+             <div style="margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px;">
+                 <input type="button" class="menu_button" id="na_reset_state" value="重置状态">
+                 <input type="button" class="menu_button" id="na_refresh_state" value="刷新显示">
+-                <input type="button" class="menu_button" id="na_reload_worldbook_cache" value="刷新世界书缓存">
+                 <input type="button" class="menu_button" id="na_export_data" value="导出数据">
+                 <input type="button" class="menu_button" id="na_import_data" value="导入数据">
+             </div>
+--- /dev/null
++++ b/save-custom.js
+@@ -0,0 +1,102 @@
++// Yu's requested changes, isolated from the original generation engine.
++import { WorldInfoResolver as OriginalWorldInfoResolver } from './worldbook.js';
++import { CharacterReader } from './readers.js';
++import { getSTContext } from './utils.js';
++
++export class WorldInfoResolver extends OriginalWorldInfoResolver {
++  constructor(stateManager) {
++    super(stateManager, 'none');
++  }
++
++  // Do not inspect embedded character_book entries or load external world books.
++  async _getAll() { return []; }
++  _getAllFromCard() { return []; }
++  async _getAllFromWorld() { return []; }
++  _getWorldName() { return ''; }
++  _trySyncBuildFormattingSet() { this._formattingContentSet = new Set(); }
++
++  // Keep the role card through the original reader and existing context slot.
++  // This reads character fields, not character_book entries.
++  async getConstantBeforeCharEntries() {
++    const text = await new CharacterReader().getFullInfo();
++    return text ? [`<character_card>\n${text}\n</character_card>`] : [];
++  }
++}
++
++const DISPLAY_KEY = 'save_original_summary_display';
++function displayHash(text) {
++  let value = 2166136261;
++  for (let i = 0; i < text.length; i++) value = Math.imul(value ^ text.charCodeAt(i), 16777619);
++  return (value >>> 0).toString(16);
++}
++
++export function withoutSummaryFooter(raw) {
++  if (typeof raw !== 'string') return null;
++  const opening = /^\s*<context>\s*\n?/i.exec(raw);
++  const close = raw.toLowerCase().lastIndexOf('</context>');
++  if (!opening || close < opening[0].length) return null;
++  const tail = raw.slice(close + '</context>'.length);
++  const footer = /^\s*<summary>[\s\S]*?<\/summary>/i.exec(tail);
++  if (!footer) return null;
++  const narrative = raw.slice(opening[0].length, close).trim();
++  const after = tail.slice(footer[0].length).trim();
++  return [narrative, after].filter(Boolean).join('\n\n');
++}
++
++export function applySummaryDisplay(message) {
++  if (!message || message.is_user || message.is_system) return false;
++  const extra = message.extra;
++  const ownership = extra?.[DISPLAY_KEY];
++  const current = extra?.display_text;
++  const ownsDisplay = ownership && typeof current === 'string' && ownership.hash === displayHash(current);
++
++  // Preserve display overrides installed by another extension.
++  if (current != null && !ownsDisplay) {
++    if (ownership) delete extra[DISPLAY_KEY];
++    return false;
++  }
++
++  const preview = withoutSummaryFooter(message.mes);
++  if (preview === null) {
++    if (!ownsDisplay) return false;
++    delete extra.display_text;
++    delete extra[DISPLAY_KEY];
++    return true;
++  }
++
++  message.extra ??= {};
++  message.extra.display_text = preview;
++  message.extra[DISPLAY_KEY] = { version: 1, hash: displayHash(preview) };
++  return current !== preview;
++}
++
++export function installSummaryDisplay() {
++  const ctx = getSTContext();
++  if (!ctx?.eventSource) return;
++  const refreshOne = index => {
++    const current = getSTContext();
++    const message = current?.chat?.[Number(index)];
++    if (!applySummaryDisplay(message)) return;
++    if (typeof document !== 'undefined' && document.querySelector(`#chat .mes[mesid="${Number(index)}"] .edit_textarea`)) return;
++    current.updateMessageBlock?.(Number(index), message);
++  };
++  const refreshAll = () => {
++    const current = getSTContext();
++    for (let i = 0; i < (current?.chat?.length || 0); i++) refreshOne(i);
++  };
++  for (const key of ['MESSAGE_EDITED', 'MESSAGE_UPDATED', 'CHARACTER_MESSAGE_RENDERED', 'MESSAGE_SWIPED']) {
++    if (ctx.eventTypes[key]) ctx.eventSource.on(ctx.eventTypes[key], refreshOne);
++  }
++  if (ctx.eventTypes.CHAT_CHANGED) ctx.eventSource.on(ctx.eventTypes.CHAT_CHANGED, refreshAll);
++  refreshAll();
++}
++
++export async function renderLocalSettings(ctx = getSTContext()) {
++  const folder = decodeURIComponent(new URL('./', import.meta.url).pathname.split('/').filter(Boolean).at(-1));
++  let render = ctx?.renderExtensionTemplateAsync;
++  if (typeof render !== 'function') {
++    const native = await import(new URL('../../../extensions.js', import.meta.url).href);
++    render = native.renderExtensionTemplateAsync;
++  }
++  return await render(`third-party/${folder}`, 'settings');
++}

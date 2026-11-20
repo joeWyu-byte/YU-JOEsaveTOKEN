@@ -1,4 +1,3 @@
-import { MESSAGE_KEY, PLACEHOLDER } from "./constants.js";
 export function truncate(text, maxLen) {
   if (!text || text.length <= maxLen) return text || "";
   return text.substring(0, maxLen) + "...";
@@ -31,7 +30,7 @@ export function deepMerge(target, source) {
 }
 
 export function getSTContext() {
-  try { return globalThis.SillyTavern?.getContext() ?? null; } catch { return null; }
+  try { return window.SillyTavern?.getContext() ?? null; } catch { return null; }
 }
 
 export function extractPresetContext() {
@@ -198,7 +197,7 @@ export function parseTextToVariables(text) {
 }
 
 export function getConversationId() {
-  try { const ctx = getSTContext(); return `${ctx?.characters?.[ctx.characterId]?.avatar || ctx?.characterId || "none"}:${ctx?.chatId || "none"}`; } catch { return "default"; }
+  try { const ctx = getSTContext(); return ctx?.chatId || ctx?.characterId || "default"; } catch { return "default"; }
 }
 
 export function getLatestUserInput(chat) {
@@ -227,46 +226,3 @@ export function isApiFailure(err) {
   if (msg.includes("请求可能被取消") || msg.includes("API错误")) return true;
   return false;
 }
-// Change detector, not a security hash; works on HTTP mobile clients without crypto.subtle.
-export function contentKey(text) {
-  let a = 2166136261, b = 0x9e3779b9;
-  for (let i = 0; i < text.length; i++) { a = Math.imul(a ^ text.charCodeAt(i), 16777619); b = Math.imul(b ^ text.charCodeAt(i), 2246822519); }
-  return `${text.length}:${a >>> 0}:${b >>> 0}`;
-}
-export function bodyOf(message) {
-  const text = String(message?.mes || '');
-  const match = text.match(/<context>\s*([\s\S]*?)\s*<\/context>/i);
-  return (match ? match[1] : text).trim();
-}
-export function extractTurns(chat) {
-  const turns = [];
-  let pending = [], n = 1, previous = '';
-  for (let i = 0; i < chat.length; i++) {
-    const msg = chat[i];
-    if (msg.is_system || msg.extra?.[MESSAGE_KEY]?.failed) continue;
-    if (msg.is_user) { pending.push(String(msg.mes || '')); continue; }
-    if (!msg.mes || msg.mes.includes(PLACEHOLDER)) continue;
-    const narrativeText = bodyOf(msg);
-    const turnNum = !turns.length && !pending.length ? 0 : n++;
-    const userInput = pending.join('\n\n');
-    const sourceKey = contentKey(previous + JSON.stringify([turnNum, userInput, narrativeText]));
-    const saved = msg.extra?.[MESSAGE_KEY];
-    const legacy = msg.mes.match(/<summary>\s*([\s\S]*?)\s*<\/summary>/i)?.[1];
-    const entries = saved?.schema === 2 ? (saved.sourceKey === sourceKey ? saved.summaryEntries : []) : legacy ? [legacy] : [];
-    const summaryEntries = Array.isArray(entries) ? entries.filter(s => typeof s === 'string' && s.trim()) : [];
-    const validSource = saved?.schema === 2 && saved.sourceKey === sourceKey;
-    turns.push({ turnNum, userInput, narrativeText, chatIndex:i, sourceKey, summaryEntries,
-      analysisState:validSource ? saved.analysisState : undefined, blockReason:validSource ? saved.blockReason : undefined });
-    previous = sourceKey; pending = [];
-  }
-  return turns;
-}
-export function updateSwipe(message) {
-  const id = message.swipe_id;
-  if (!Number.isInteger(id) || !Array.isArray(message.swipes)) return;
-  message.swipes[id] = message.mes;
-  message.swipe_info ??= [];
-  message.swipe_info[id] = { ...(message.swipe_info[id] || {}), extra: structuredClone(message.extra || {}), gen_started:message.gen_started, gen_finished:message.gen_finished, send_date:message.send_date };
-}
-
-export function substitute(text) { const ctx=getSTContext(); return ctx?.substituteParams ? ctx.substituteParams(String(text || "")) : String(text || ""); }

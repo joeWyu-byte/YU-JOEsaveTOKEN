@@ -1,140 +1,50 @@
 {
-  "upstream": "Lol1p0p/narrative-agent",
-  "localVersion": "0.2.1",
-  "forkVersion": "0.2.3",
-  "stableWindowMethodUnchanged": true,
-  "files": [
-    {
-      "name": "agent-analysis.js",
-      "currentSha256": "f9a41246e9eda00d61e221b4c410f402fd5384b403e99e6a9402335649dc1ae5",
-      "upstreamSha256": "9057a3987f0e30aef4f86e06db7fb532df438bcbce42d6b4f6013a61aaa6b3f3",
-      "byteIdentical": false
-    },
-    {
-      "name": "agent-planning.js",
-      "currentSha256": "5c3b793776efe7918d3cc214507a798cf14a684a69e5a09094cf8edeb4a7ea95",
-      "upstreamSha256": "7af8ed0a3bcfcbeee1195c57cddbf3da975f595c375511c249471e633d938d36",
-      "byteIdentical": false
-    },
-    {
-      "name": "agent-writing.js",
-      "currentSha256": "1d191ee02f93ffe9b7cd669a90d3e75d6414f7a12dd6effd0c04cfd0c22717d6",
-      "upstreamSha256": "5a6c8b1b7c55e3aabe7e359f99392ab7be460a1a271a0a0e792e4e22475d6b6f",
-      "byteIdentical": false
-    },
-    {
-      "name": "bridge.js",
-      "currentSha256": "0a320508f72816cbc0a1a8d41aef3efc3266cf0381a1f13bc6a202b29e1ec717",
-      "upstreamSha256": "5f007eb0be60f4c1fb140869c16b68928f86d74d68f82f26cb82fb3acd92cf39",
-      "byteIdentical": false
-    },
-    {
-      "name": "constants.js",
-      "currentSha256": "271c36d13ebcf3fd46506fec3e825205b00859b3e487b76a7ec381f69ebedd24",
-      "upstreamSha256": "31baca4168628adefd9fd28d288b30a83c630e3f3dc5e36c0e712bb99fe3a23f",
-      "byteIdentical": false
-    },
-    {
-      "name": "context-router.js",
-      "currentSha256": "1d506f9f6d8b5e2522f7872ff16085525dff0163333fa1abf0e1012cca7eba9f",
-      "upstreamSha256": "f1cce973f2f7d95285d163a450505d8f41cbd9977f0c8013550c76f0cdbb3569",
-      "byteIdentical": false
-    },
-    {
-      "name": "errors.js",
-      "currentSha256": "77139f4c95f824e04d34a56dc5927806bb2acda86cd1c588735d3dcd5cfb500c",
-      "upstreamSha256": null,
-      "byteIdentical": false
-    },
-    {
-      "name": "index.js",
-      "currentSha256": "6bae26ba64c9765b1419b0d9890bf43b18ec92b51650955faf99a36c66541ae6",
-      "upstreamSha256": "134a7f77a704d18dd56b675d8fe28a11fa2e5dcba2a58273fbe0e4d182290c03",
-      "byteIdentical": false
-    },
-    {
-      "name": "lifecycle.js",
-      "currentSha256": "0ac600a54911f63fa7abc666aba6fd7acbe7dcecca143d8279afc064fe3159cf",
-      "upstreamSha256": null,
-      "byteIdentical": false
-    },
-    {
-      "name": "llm.js",
-      "currentSha256": "72a4c384f218ccc368061ae6bf51116dd4248dcca91e57a39947f59dca901e56",
-      "upstreamSha256": "ee54f2fe76616a777f497eae357b26ed16050d4a103c1d495a83ad899a31e5c0",
-      "byteIdentical": false
-    },
-    {
-      "name": "manifest.json",
-      "currentSha256": "03af89c3ca0a3f60980942c0088c28b9575a82b0e67ced7756f7918a7c19e45b",
-      "upstreamSha256": "2bd17c7ce2649f6a45f90f1f21dc09fae572d4e8f6735df10371764f65bdcabb",
-      "byteIdentical": false
-    },
-    {
-      "name": "orchestrator.js",
-      "currentSha256": "855d3d56e229f5a6afae3d50f97a0f8b308098973ed66a3bf1c54a472273eb8d",
-      "upstreamSha256": "78d8e0e020cc4c6efabee8db8dd16be5c31e8009153a5619ae401985afa84df0",
-      "byteIdentical": false
-    },
-    {
-      "name": "package.json",
-      "currentSha256": "0d26d31e3b120716d6adaa681fbf46df41c760b1d0b277a073018b4912c49d06",
-      "upstreamSha256": null,
-      "byteIdentical": false
-    },
-    {
-      "name": "parser.js",
-      "currentSha256": "57daea7899a33f0c9ca07570faf30d4aeacd12d0e00b6b49ba4b2130986a8101",
-      "upstreamSha256": "d62d49d4909f1b8afa35a2821328dffb70a0f694b8b695565b1196e376cd6be5",
-      "byteIdentical": false
-    },
-    {
-      "name": "persistence.js",
-      "currentSha256": "f68b743ee0979cdbd6925f3149f6c4118e85f325c6bdf761ae36747494b1429c",
-      "upstreamSha256": null,
-      "byteIdentical": false
-    },
-    {
-      "name": "readers.js",
-      "currentSha256": "24311d4164cb35b95088fb23e6d4551532a6f2689fb29c2dc664ea95469f5a6a",
-      "upstreamSha256": "58a86138214c39ac13e8c06dc201d5f68c9111508e3848a72299d8ddb24a6f99",
-      "byteIdentical": false
-    },
-    {
-      "name": "response.js",
-      "currentSha256": "0d6bab8cd7ab5077fc1a8275b77bb0acf326d21c78487d0319d0c68dd0f86372",
-      "upstreamSha256": null,
-      "byteIdentical": false
-    },
-    {
-      "name": "settings.js",
-      "currentSha256": "038097aa6802a598faa456ead512b011e4ec0180879c4731320086f8204b2076",
-      "upstreamSha256": "6d90e10ef6601a4d30d016ffa59e0a2af59e8ec0193173b6a678d3c38a0be1bf",
-      "byteIdentical": false
-    },
-    {
-      "name": "state.js",
-      "currentSha256": "8aaed015c16a1f9e62250f990783fc9686c56efc93c27c28c90f83e0f6904007",
-      "upstreamSha256": "46171700fafe7c8bda6062cce0afcf721d70fd9554c52d251d5be18262e2870a",
-      "byteIdentical": false
-    },
-    {
-      "name": "store.js",
-      "currentSha256": "8c26b572c51a8e5901659a4110e10994295bb77b3e5d8eb834c23ac8b9d7b5f6",
-      "upstreamSha256": "8c26b572c51a8e5901659a4110e10994295bb77b3e5d8eb834c23ac8b9d7b5f6",
-      "byteIdentical": true
-    },
-    {
-      "name": "style.css",
-      "currentSha256": "30b8eafef4d9778622cfc19cf8394c0b35f90adf33c28a706214d05c76a40e36",
-      "upstreamSha256": "bdbea234ee60118e7d87a1ed1ef54755b07f498425ff26a0163cc5753e532dfb",
-      "byteIdentical": false
-    },
-    {
-      "name": "utils.js",
-      "currentSha256": "b204f2e19ac8ea7d553d468d092939c0338ee4d148e286671954f0ca08b2d5d1",
-      "upstreamSha256": "3ff59e7287a1d432c2031576ef52617408b8b36b1cb9409ea04b78ffd89f24d6",
-      "byteIdentical": false
-    }
-  ]
+  "project": "Lol1p0p/narrative-agent",
+  "source": "https://github.com/Lol1p0p/narrative-agent.git",
+  "upstreamCommit": "29a86d7323eb409131fdb28d926e3ea451eccb5c",
+  "upstreamVersion": "0.2.1",
+  "customVersion": "0.4.0",
+  "headVerifiedOn": "2026-11-20",
+  "hashAlgorithm": "sha256",
+  "hashBytes": "Checked-out source bytes (Git for Windows CRLF checkout)",
+  "upstreamFileHashes": {
+    "agent-analysis.js": "cb43bb8c26cd89c87c0d0fd20bdab163df0c98386151f8e647caa24cc16f57e8",
+    "agent-planning.js": "e1b2448bd47a4a89a1c988f26b7594ce7356ff6c436ea53f8ab9551d5fbc5a4b",
+    "agent-writing.js": "41374bb11fe2a78e68296b1762a44f9bdd478c57c8b8e15ea97921a25b7be1b7",
+    "bridge.js": "794aec75955b7c0a2605c6d0e776e45950bd2ec7f0f52a2f26dcf67d873fa274",
+    "constants.js": "1499086fe6e2ac2a3f723254171c7311d418a7bc355119a1d82089a86fe97ba4",
+    "context-router.js": "f2ea125641d1654dfe7007c65e48119c58057db3821561e5e2130d27c578d9ba",
+    "dice.js": "bc2db64e53da57c13d404302fcc75d0047ec697d561fdfa94e00936bc805199a",
+    "index.js": "e8191a4a763132f93b0f4b93a9bb7dc023115c57b8aafad62221fc5b75cef843",
+    "LICENSE": "d9ffe0022a6e037752c0852cde275e2ed41fa5645092386d018b7076b189fae8",
+    "llm.js": "6bb784e344971d8c5b32f28519d37634196abee8b31415d1b39727d5a04b80a8",
+    "manifest.json": "ae816fc4bb3d375b65b60e80c8e6dc7a0e53eccd604357dafbc4fc4e2d62b05e",
+    "mvu.js": "e4d46d4267cf282796266dc1992141be703cccb81ee3e7217160891fb002e652",
+    "orchestrator.js": "2bc503c17b9a6e321cfab742550dd40c7d8751926eab32dbac41fc8dffec1dbf",
+    "parser.js": "6d456a4bd4c9b13de9057449de2e7f15073bd3faa122c4d52f5476c38539ba60",
+    "readers.js": "df56f81b4a7a5b2fe8283fecb403b599225cc0e51ddda378fde79a095f8b0345",
+    "README.md": "36b1fda62857f3f8a4f58d5f63f5c07e881b9a2c07a7aabf2d11b2ec70e6fc3b",
+    "settings.html": "1debb149cbdc6aa06e662fcefcf4e9467e0ca27b4d7338e2fb8b385174803b3b",
+    "settings.js": "a459a1463f7de73aad3bec3432a3e084ca533014e9246c23ef2377fc5c6083d5",
+    "state.js": "2963fd1734f8a6be6cab19eb1390fbd4e9718e5f3065b9c9e16d311768e15580",
+    "store.js": "aab8c06b9ff5460e03328ecd711578cb5de723c6c4aa3f2129cc97f9296b4f17",
+    "style.css": "6d3ead8d3e795df7abc216f529218ea77ee903984cb3a7e23bc69988f91536a5",
+    "tools.js": "e1e39ea30f56ad4b91dce60954a2f93d5ec067aaf1293f1b8131b252630cf4d6",
+    "TUTORIAL.html": "2f13c5c4e9a4529119eecbeadf85d1b157403c955e436149f886c8a3f1723ef5",
+    "utils.js": "a321fd4c79d083c515ff6d7c7b2967ec604202230f17e370c34db8c92f0af81c",
+    "worldbook.js": "fc37e794deb5869f35c61881053790f5181a8bbdb8d16026368ad8602a933226"
+  },
+  "modifiedOriginalRuntimeFiles": [
+    "index.js",
+    "bridge.js"
+  ],
+  "addedRuntimeFiles": [
+    "save-custom.js"
+  ],
+  "modifiedOriginalMetadataAndUI": [
+    "manifest.json",
+    "settings.html"
+  ],
+  "unchangedOriginalJavaScriptFiles": 17,
+  "READMEOriginalPreservedAs": "UPSTREAM-README.md"
 }
