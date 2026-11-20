@@ -1,4 +1,3 @@
-// Derived from Narrative Agent 0.2.1 (MIT). RPG StateManager removed.
 export class SummaryStore {
   constructor() { this._entries = []; }
 

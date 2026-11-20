@@ -1,11 +1,12 @@
 // Narrative Agent's native relay -> raw generation -> per-turn analysis bridge.
 // Each run owns its cancellation, live records and guarded message writes.
 import { PLACEHOLDER, MESSAGE_KEY } from './constants.js';
-import { getSTContext, getConversationId, getLatestUserInput, extractPresetContext, extractTurns, contentKey, updateSwipe } from './utils.js';
+import { getSTContext, getConversationId, getLatestUserInput, extractPresetContext, extractTurns, contentKey, updateSwipe, bodyOf } from './utils.js';
 import { setCallSession } from './llm.js';
 import { blockReasonOf, PipelineCancelledError, StageTimeoutError } from './errors.js';
 import { bounded, deadlineFor } from './lifecycle.js';
 import { ChatPersistence } from './persistence.js';
+import { adaptHistory, chatPresetContext, applyDisplay, displayBody, refreshDisplays, installNativeEditorAdapter } from './compat.js';
 
 const supported = new Set(['normal','regenerate','swipe','continue']);
 const clone = value => JSON.parse(JSON.stringify(value));
@@ -14,6 +15,7 @@ export class SillyTavernBridge {
     this.orchestrator = orchestrator; this.report = report; this.enabled = true;
     this.isPipelineRunning = false; this._pending = null; this.lastRun = null;
     this.handlers = []; this.persistence = new ChatPersistence(); this._runCounter = 0;
+    this._known = null;
   }
   _report(text) { this.status = text; try { this.report(text); } catch (error) { console.warn('[Save] 状态显示失败', error); } }
   install() {
@@ -29,8 +31,12 @@ export class SillyTavernBridge {
     bind('GENERATION_STOPPED', this._onStopped);
     bind('CHAT_CHANGED', this._onChatChanged);
     bind('CHAT_COMPLETION_SETTINGS_READY', this._onSettingsReady, true);
+    for (const event of ['MESSAGE_EDITED','MESSAGE_UPDATED','CHARACTER_MESSAGE_RENDERED','MESSAGE_SWIPED']) bind(event,this._onMessageUpdated,true);
+    this._onMessageUpdated();
+    this._removeEditorAdapter=installNativeEditorAdapter();
   }
   uninstall() {
+    this._removeEditorAdapter?.();
     this.cancel('uninstall'); const ctx = getSTContext();
     for (const [name,fn] of this.handlers) ctx.eventSource.removeListener(name,fn);
     this.handlers = [];
@@ -39,7 +45,12 @@ export class SillyTavernBridge {
     if (data?.saveInternalRun) return;
     this.cancel('stop');
   }
-  _onChatChanged() { this.cancel('chat-changed'); }
+  _onChatChanged() { this.cancel('chat-changed'); this._known=null; this._onMessageUpdated(); }
+  _onMessageUpdated() {
+    if(this.isPipelineRunning || this._pending?.intercepted)return;
+    const ctx=getSTContext();if(!ctx?.chat)return;
+    refreshDisplays();this._known={conversation:getConversationId(),chat:ctx.chat,before:clone(ctx.chat)};
+  }
   _abortRaw(session) {
     const ctx = getSTContext();
     try {
@@ -78,7 +89,12 @@ export class SillyTavernBridge {
     const run = { id:`save-${Date.now()}-${++this._runCounter}`, status:'preparing', stage:'native-prompt',
       startedAt:Date.now(), type, requests:[], saves:[], warnings:[] };
     this.lastRun = run;
-    this._pending = { type, run, conversation:getConversationId(), chat:ctx.chat, before:clone(ctx.chat),
+    let before=clone(ctx.chat);
+    if(type==='regenerate' && before.at(-1)?.is_user && this._known?.conversation===getConversationId() && this._known.chat===ctx.chat) {
+      const prior=this._known.before;
+      if(prior.length===before.length+1 && !prior.at(-1).is_user && JSON.stringify(prior.slice(0,-1).map(m=>[m.is_user,m.mes]))===JSON.stringify(before.map(m=>[m.is_user,m.mes]))) before=clone(prior);
+    }
+    this._pending = { type, run, conversation:getConversationId(), chat:ctx.chat, before,
       intercepted:false, cancelled:false, requests:run.requests };
     this._report('已收到生成事件，等待接管请求……');
   }
@@ -92,9 +108,10 @@ export class SillyTavernBridge {
       p.run.status = 'native-fallback'; this._pending = null;
       this._report('这段聊天含图片、附件或工具结果，暂时交回原生生成。'); return;
     }
-    p.history = clone(history); p.continuation = p.type === 'continue' ? p.before.at(-1)?.mes || '' : '';
-    p.userInput = getLatestUserInput(history); p.preset = extractPresetContext(data.chat);
-    p.run.context = { mode:p.preset.source, presetRoles:p.preset.messages.map(m=>m.role) };
+    p.history = clone(history); p.continuation = p.type === 'continue' ? displayBody(p.before.at(-1)?.mes || '') : '';
+    p.adapted=adaptHistory(p.history);
+    p.userInput = getLatestUserInput(p.adapted.view); p.preset = chatPresetContext();
+    p.run.context = { mode:p.preset.source, presetRoles:['system','user'], historyAdapter:'original-tags-compatible' };
     p.run.nativePrompt = { chars:JSON.stringify(data.chat).length, roles:data.chat.map(m => m.role), fingerprint:contentKey(JSON.stringify(data.chat)) };
     p.source = contentKey(JSON.stringify(history.map(m => [m.is_user,m.mes]))); p.prefixLength = history.length;
     data.chat.splice(0,data.chat.length);
@@ -129,7 +146,7 @@ export class SillyTavernBridge {
     if(!target || target.is_user || !target.mes?.includes(PLACEHOLDER))return;
     const previous=p.before.at(-1);
     if(['swipe','continue','regenerate'].includes(p.type)&&previous&&!previous.is_user)Object.assign(target,clone(previous));
-    else {target.mes='⚠️ 本次接管已停止。';target.extra??={};target.extra[MESSAGE_KEY]={failed:true};}
+    else {target.mes='';target.extra??={};target.extra[MESSAGE_KEY]={failed:true};applyDisplay(target);}
     try {updateSwipe(target);ctx.updateMessageBlock?.(index,target);}catch{/* Preserve the stopped run. */}
     this._saveAfterRelease(p,ctx);
   }
@@ -170,7 +187,7 @@ export class SillyTavernBridge {
       if (target && !target.is_user && (target.mes?.includes(PLACEHOLDER) || ctx.chat.length > p.history.length)) {
         const previous = p.before.at(-1);
         if (['swipe','continue','regenerate'].includes(p.type) && previous && !previous.is_user) Object.assign(target,clone(previous));
-        else { target.mes='⚠️ 接管请求未完成，请检查 API 或重试。'; target.extra ??= {}; target.extra[MESSAGE_KEY]={failed:true}; }
+        else { target.mes=''; target.extra ??= {}; target.extra[MESSAGE_KEY]={failed:true};applyDisplay(target); }
         try { updateSwipe(target); ctx.updateMessageBlock?.(index,target); } catch { /* Record remains available. */ }
       }
       this._report('Relay 没有完成，后台回复和摘要未执行。'); this._saveAfterRelease(p,ctx); return;
@@ -189,8 +206,8 @@ export class SillyTavernBridge {
       onUpdate:stage=> { p.run.stage=stage; if(this.lastRun===p.run) this._report(this.status || stage); },
     };
     this.session=session; this.orchestrator.session=session; setCallSession(session);
-    const render=()=>ctx.updateMessageBlock?.(index,target);
-    const setBody=text=> { session.check(); target.mes=text; lastBody=text; target.extra ??= {}; delete target.extra.display_text; delete target.extra.token_count; updateSwipe(target); render(); };
+    const render=()=> {ctx.updateMessageBlock?.(index,target);if(typeof document!=='undefined')document.querySelector(`#chat .mes[mesid="${index}"]`)?.classList.toggle('save-na-empty',!target.mes);};
+    const setBody=text=> { session.check(); target.mes=text; lastBody=text; target.extra ??= {};target.extra.save_ui={version:'0.3.0'};applyDisplay(target); delete target.extra.token_count; updateSwipe(target); render(); };
     try {
       unlock=this._lockUI();
       target.extra ??= {};
@@ -203,21 +220,35 @@ export class SillyTavernBridge {
           reasoning_duration:(prior.reasoning_duration||0)+(response.reasoning ? response.durationMs : 0),
           reasoning_type:response.reasoning ? response.reasoningType : prior.reasoning_type || 'model',reasoning_signature:response.reasoningSignature});
       };
-      const {turns}=this.orchestrator._extractTurnHistoryFromChat(p.history);
+      const {turns}=this.orchestrator._extractTurnHistoryFromChat(p.adapted.view);
+      this.orchestrator.summaryStore.reset();this.orchestrator.summaryStore.appendEntries(p.adapted.summaries);
+      this.orchestrator.validSummaryTurns=p.adapted.validSummaryTurns;
+      this.orchestrator.skipOpeningAnalysis=p.adapted.skipOpeningAnalysis;
+      this.orchestrator.continuation=p.continuation;
+      this.orchestrator.openingAnalysisState=undefined;
       this.orchestrator.applyChatExtractedContext(turns); this.orchestrator.setPresetContext(p.preset);
       this.orchestrator.onProgress(text=> {session.check();this._report(text);});
-      this.orchestrator.onDraft=async (text,metadata)=> {
-        draft=text; p.draftMeta=metadata;
+      this.orchestrator.onDraft=async text=> {
+        const n=this.orchestrator.turnCounter+1,previous=p.adapted.turns.at(-1)?.sourceKey || '';
+        const metadata={turnNum:n,sourceKey:contentKey(previous+JSON.stringify([n,p.userInput,text]))};
+        draft='<context>\n'+text+'\n</context>'; p.draftMeta=metadata;
         target.extra[MESSAGE_KEY]={schema:2,...metadata,summaryEntries:[],analysisState:'pending'};
-        setBody(text);
+        setBody(draft);
         const saved=await this._save(p,ctx,session,'reply-save',session.controller.signal);
         if (!['saved','saved-late'].includes(saved.status)) this.orchestrator.warnings.push('回复尚未确认保存，已保留未保存备份。');
         session.check();
       };
       setBody(p.continuation || '');
-      const result=await this.orchestrator.pipeline(p.userInput,p.type!=='normal',ctx.chat,{continuation:p.continuation});
+      const engineInput=p.continuation ? p.userInput+'\n\n<continue_from>\n'+p.continuation+'\n</continue_from>\n请从已有回复结尾继续，只输出新增部分。' : p.userInput;
+      const result=await this.orchestrator.pipeline(engineInput,false,p.adapted.view);
       session.check(); setBody(result.finalOutput);
-      target.extra[MESSAGE_KEY]={schema:2,turnNum:result.turnNum,sourceKey:result.sourceKey,summaryEntries:result.summaryEntries,analysisState:result.analysisState,blockReason:result.blockReason};
+      target.extra[MESSAGE_KEY]={schema:2,turnNum:result.turnNum,sourceKey:p.draftMeta?.sourceKey,summaryEntries:result.summaryEntries,analysisState:result.analysisState,blockReason:result.blockReason};
+      const opening=p.adapted.turns.find(t=>t.turnNum===0);
+      if(opening && !opening.summaryEntries.length) {
+        const entries=this.orchestrator.summaryStore.toDict().entries.filter(s=>/^\[第0轮\]/.test(s));
+        const originalOpening=ctx.chat.find(m=>!m.is_user && bodyOf(m)===opening.narrativeText);
+        if(originalOpening) {originalOpening.extra??={};originalOpening.extra[MESSAGE_KEY]={schema:2,turnNum:0,sourceKey:opening.sourceKey,summaryEntries:entries,analysisState:this.orchestrator.openingAnalysisState || 'complete'};}
+      }
       target.gen_finished=new Date().toISOString(); updateSwipe(target);
       if(p.requests.some(r=>r.rawResponseUnavailable)) result.warnings.push('当前酒馆缺少完整响应接口，无法读取单独返回的思考字段。');
       Object.assign(p.run,{status:'complete',stage:'complete',mode:this.orchestrator.config.pipeline.enableTextRecall?'split':'merged',
@@ -230,16 +261,29 @@ export class SillyTavernBridge {
       if(target.mes===lastBody && this._sameChat(p,ctx,target,index)) {
         if(draft) {target.mes=draft;target.extra ??= {};target.extra[MESSAGE_KEY]={schema:2,...p.draftMeta,summaryEntries:[],analysisState:'pending'};}
         else if(['swipe','continue','regenerate'].includes(p.type) && p.before.at(-1) && !p.before.at(-1).is_user) Object.assign(target,clone(p.before.at(-1)));
-        else {target.mes='⚠️ 本次回复未完成，请查看 Save 执行记录。';target.extra ??= {};target.extra[MESSAGE_KEY]={failed:true};}
+        else {target.mes='';target.extra ??= {};target.extra[MESSAGE_KEY]={failed:true};}
+        applyDisplay(target);
         try {updateSwipe(target);render();} catch(renderError) {p.run.warnings.push('消息显示未完成，生成操作已恢复。');console.warn('[Save] 显示失败',renderError);}
       }
-      this._report(`本轮已结束：${error.message}。${draft?'已生成正文和思考保留。':''}`);
+      const stageName={relay:'Relay',planning:'规划',writing:'正文','merged-writing':'正文','merged-analysis':'摘要'}[p.run.stage] || p.run.stage;
+      this._report(reason?`${stageName}请求被接口拦截（${reason}），本轮已结束，操作已恢复。`:`${stageName}步骤未完成：${error.message}。${draft?'已生成正文和思考保留。':''}`);
     } finally {
       p.run.finishedAt=Date.now();p.run.durationMs=p.run.finishedAt-p.run.startedAt;
       setCallSession(null);this.session=null;this.orchestrator.session=null;this.orchestrator.onDraft=null;
       this.isPipelineRunning=false;
       try {unlock();} catch(error) {console.warn('[Save] 界面收尾失败',error);}
+      if(this._sameChat(p,ctx,target,index)) {
+        const opening=p.adapted.turns.find(t=>t.turnNum===0);
+        if(opening && !opening.summaryEntries.length) {
+          const entries=this.orchestrator.summaryStore.toDict().entries.filter(s=>/^\[第0轮\]/.test(s));
+          const m=ctx.chat.find(m=>!m.is_user && bodyOf(m)===opening.narrativeText);
+          if(m && (entries.length || this.orchestrator.openingAnalysisState)) {
+            m.extra??={};m.extra[MESSAGE_KEY]={schema:2,turnNum:0,sourceKey:opening.sourceKey,summaryEntries:entries,analysisState:this.orchestrator.openingAnalysisState || 'complete'};
+          }
+        }
+      }
       this._saveAfterRelease(p,ctx);
+      if(this._sameChat(p,ctx,target,index))this._known={conversation:p.conversation,chat:ctx.chat,before:clone(ctx.chat)};
       // Extension listeners cannot retain the generation lock either.
       if((draft || p.run.status==='complete') && this._sameChat(p,ctx,target,index)) {
         for(const event of ['MESSAGE_EDITED','MESSAGE_UPDATED','CHARACTER_MESSAGE_RENDERED']) if(ctx.eventTypes[event]) {

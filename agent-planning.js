@@ -13,7 +13,7 @@ export async function runPlanningAgent(ctx) {
 
   let systemContent = "";
 
-  if (!ctx.presetMessages && ctx.presetContext) {
+  if (ctx.presetContext) {
     systemContent += ctx.presetContext;
   }
 
@@ -24,7 +24,6 @@ export async function runPlanningAgent(ctx) {
 
   if (systemContent) systemContent += "\n\n";
   systemContent += PLANNING_SYSTEM_SUFFIX;
-
 
   let userContent = "";
   if (ctx.beforeCharEntries && ctx.beforeCharEntries.length > 0) {
@@ -42,7 +41,6 @@ export async function runPlanningAgent(ctx) {
   userContent += "\n\n\u8bf7\u751f\u6210\u5199\u4f5c\u6307\u5bfc\u3002";
 
   const messages = [
-    ...(ctx.presetMessages || []).map(m => ({...m})),
     { role: "system", content: systemContent },
     { role: "user", content: userContent },
   ];

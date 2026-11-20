@@ -11,3 +11,4 @@
 #save-na-panel summary { cursor:pointer; margin:12px 0; }
 body[data-save-na-running="true"] #mes_stop { display:flex !important; }
 body[data-save-na-running="true"] #send_but { display:none !important; }
+.mes.save-na-empty { display: none !important; }

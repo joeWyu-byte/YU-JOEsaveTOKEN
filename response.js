@@ -1,6 +1,16 @@
 // Preserve only the reasoning the provider actually returns, following native ST settings.
 import { getSTContext } from './utils.js';
 let helpersPromise;
+let scriptPromise;
+async function nativeScript(ctx) {
+  if(typeof ctx.cleanUpMessage==='function')return ctx;
+  if(typeof document==='undefined')return null;
+  scriptPromise ??= import(new URL('../../../../script.js',import.meta.url).href).catch(()=>null);
+  return await scriptPromise;
+}
+export async function canReadNativeData(ctx=getSTContext()) {
+  return typeof (await nativeScript(ctx))?.cleanUpMessage==='function';
+}
 async function nativeHelpers(ctx) {
   if (typeof ctx.extractReasoningFromData === 'function') return ctx;
   helpersPromise ??= import(new URL('../../../reasoning.js', import.meta.url).href).catch(() => null);
@@ -26,6 +36,11 @@ export async function decodeWritingResponse(data, durationMs, ctx = getSTContext
   const source = ctx.chatCompletionSettings?.chat_completion_source;
   const options = { mainApi:ctx.mainApi, chatCompletionSource:source };
   let text = typeof ctx.extractMessageFromData === 'function' ? ctx.extractMessageFromData(data, ctx.mainApi) : extractText(data);
+  if(typeof data!=='string') {
+    const native=await nativeScript(ctx);
+    if(typeof native?.cleanUpMessage==='function')text=native.cleanUpMessage({getMessage:text,isImpersonate:false,isContinue:false,
+      displayIncompleteSentences:true,includeUserPromptBias:false,trimNames:true,trimWrongNames:true});
+  }
   let reasoning = typeof helpers?.extractReasoningFromData === 'function'
     ? helpers.extractReasoningFromData(data, options) : fallbackReasoning(data, ctx.chatCompletionSettings);
   let signature = helpers?.extractReasoningSignatureFromData?.(data, options) ?? null;

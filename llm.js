@@ -1,6 +1,6 @@
 // Narrative Agent raw-generation route; preserve response metadata and classify failures.
 import { getSTContext } from './utils.js';
-import { decodeWritingResponse, extractText } from './response.js';
+import { decodeWritingResponse, extractText, canReadNativeData } from './response.js';
 import { ProviderBlockedError, blockReasonOf, isProviderBlocked, describeFailure } from './errors.js';
 import { bounded, deadlineFor } from './lifecycle.js';
 export { extractText } from './response.js';
@@ -23,9 +23,14 @@ export async function callLLM(messages, options = {}) {
     try {
       const ctx = getSTContext();
       if (!ctx?.generateRaw) throw new Error('当前酒馆没有 generateRaw 接口');
+      if(messages.length!==2 || messages[0].role!=='system' || messages[1].role!=='user')throw new Error('Save 请求结构校验失败，未发送请求');
       const execute = async () => {
       let text;
-      if (isWriting && typeof ctx.generateRawData === 'function') {
+      if(isWriting && session) {
+        if((session.writerAttempts || 0)>=3)throw Object.assign(new Error('本轮正文请求达到恢复上限'),{code:'request-budget'});
+        session.writerAttempts=(session.writerAttempts || 0)+1;
+      }
+      if (isWriting && typeof ctx.generateRawData === 'function' && await canReadNativeData(ctx)) {
         const data = await ctx.generateRawData({ prompt:messages });
         if (!accepting) throw new Error('Pipeline cancelled');
         session?.check();
@@ -70,7 +75,7 @@ export async function callLLM(messages, options = {}) {
       session?.check();
       if (isAbortError(e)) throw new Error('Pipeline cancelled');
       // A provider block is terminal. Never change safety settings or reword and resend.
-      if (reason || e?.code === 'stage-timeout' || !isRetryable(e)) break;
+      if (reason || e?.code === 'stage-timeout' || !isRetryable(e) || (isWriting && session?.writerAttempts>=3)) break;
       await bounded(() => new Promise(resolve => setTimeout(resolve, 350)), { stage:'retry-delay', timeoutMs:1000, signal:session?.controller?.signal });
     } finally {
       accepting = false;

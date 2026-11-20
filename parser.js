@@ -8,11 +8,11 @@ export function parsePlanningOutput(rawText) {
     const parsed = JSON.parse(jsonMatch[0]);
     return {
       narrative_direction: parsed.narrative_direction || "",
-      scene_setting: parsed.scene_setting || "",
       key_points: Array.isArray(parsed.key_points) ? parsed.key_points : [],
       tone: parsed.tone || "\u4e2d",
       pacing: ["\u5feb", "\u4e2d", "\u6162"].includes(parsed.pacing) ? parsed.pacing : "\u4e2d",
       continuity_notes: Array.isArray(parsed.continuity_notes) ? parsed.continuity_notes : [],
+      tool_calls: Array.isArray(parsed.tool_calls) ? parsed.tool_calls : [],
       text_recall: Array.isArray(parsed.text_recall) ? parsed.text_recall.filter(v => typeof v === "number" && v >= 0) : [],
     };
   } catch (e) {
@@ -22,11 +22,26 @@ export function parsePlanningOutput(rawText) {
 }
 
 export function getDefaultPlan() {
-  return { narrative_direction: "", key_points: [], tone: "\u4e2d", pacing: "\u4e2d", continuity_notes: [], text_recall: [] };
+  return { narrative_direction: "", key_points: [], tone: "\u4e2d", pacing: "\u4e2d", continuity_notes: [], tool_calls: [], text_recall: [] };
+}
+
+export function parseExtractionOutput(rawText) {
+  if (!rawText || typeof rawText !== "string") return { events: [] };
+  let text = rawText.trim();
+  const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenceMatch) text = fenceMatch[1].trim();
+  try {
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return { events: [] };
+    const parsed = JSON.parse(jsonMatch[0]);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { events: [] };
+    if (!Array.isArray(parsed.events)) return { events: [] };
+    return { events: parsed.events.filter(ev => ev && typeof ev === "object" && typeof ev.type === "string") };
+  } catch { return { events: [] }; }
 }
 
 export function parseMergedOutput(rawText) {
-  const result = { summary_entries: [] };
+  const result = { events: [], summary_entries: [] };
   if (!rawText || typeof rawText !== "string") return result;
 
   let text = rawText.trim();
@@ -40,6 +55,9 @@ export function parseMergedOutput(rawText) {
       return result;
     }
     const parsed = JSON.parse(jsonMatch[0]);
+    if (Array.isArray(parsed.events)) {
+      result.events = parsed.events.filter(ev => ev && typeof ev === "object" && typeof ev.type === "string");
+    }
     if (Array.isArray(parsed.summary_entries)) {
       result.summary_entries = parsed.summary_entries.filter(s => typeof s === "string" && s.trim().length > 0);
     }
@@ -48,4 +66,3 @@ export function parseMergedOutput(rawText) {
   }
   return result;
 }
-

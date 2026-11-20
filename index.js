@@ -2,8 +2,9 @@ import { SummaryStore } from './state.js';
 import { FileManager } from './store.js';
 import { CharacterReader, UserPersonaReader } from './readers.js';
 import { Orchestrator } from './orchestrator.js';
-import { SillyTavernBridge } from './bridge.js?v=0.2.3';
-import { loadConfig, mountSettings } from './settings.js?v=0.2.3';
+import { ChatContentSource } from './compat.js';
+import { SillyTavernBridge } from './bridge.js?v=0.3.0';
+import { loadConfig, mountSettings } from './settings.js?v=0.3.0';
 import { getSTContext, getConversationId } from './utils.js';
 
 export async function initExtension() {
@@ -15,7 +16,7 @@ export async function initExtension() {
   const config = loadConfig();
   const orchestrator = new Orchestrator({
     summaryStore:new SummaryStore(), fileManager:new FileManager(getConversationId()),
-    characterReader:new CharacterReader(), userPersonaReader:new UserPersonaReader(), config,
+    characterReader:new CharacterReader(), userPersonaReader:new UserPersonaReader(), contentSource:new ChatContentSource(), config,
   });
   const bridge = new SillyTavernBridge(orchestrator, text => { status = text; refresh(); });
   bridge.enabled = config.enabled;
@@ -29,7 +30,7 @@ export async function initExtension() {
     if (!next.enabled) bridge.cancel();
     status = next.enabled ? '已启用原版接管链路，等待下一次回复。' : '已停用；下次回复使用酒馆原生请求。';
   } });
-  const api = { version:'0.2.3', bridge, orchestrator };
+  const api = { version:'0.3.0', bridge, orchestrator };
   globalThis.SaveNarrativeLite = api;
   return api;
 }

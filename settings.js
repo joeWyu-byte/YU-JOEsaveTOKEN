@@ -22,7 +22,7 @@ export function mountSettings({ config, bridge, onConfig, getStatus }) {
   const panel = document.createElement('div');
   panel.id = 'save-na-panel'; panel.className = 'extension_container';
   panel.innerHTML = `<div class="inline-drawer">
-    <div class="inline-drawer-toggle inline-drawer-header"><b>Save · Narrative 精简版 0.2.3</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
+    <div class="inline-drawer-toggle inline-drawer-header"><b>Save · 原版源码裁剪版 0.3.0</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
     <div class="inline-drawer-content">
       <label class="save-na-check"><input type="checkbox" id="save-na-enabled"> 启用省 Token 接管</label>
       <p>沿用原版的短请求接管 → 回复生成 → 每轮摘要。聊天正文只显示回复。</p>
@@ -39,14 +39,13 @@ export function mountSettings({ config, bridge, onConfig, getStatus }) {
         <label class="save-na-field">回复超时（秒）<input class="text_pole" type="number" min="10" max="600" data-timeout="requestMs"></label>
         <label class="save-na-field">摘要/规划超时（秒）<input class="text_pole" type="number" min="10" max="600" data-timeout="analysisMs"></label>
       </details>
-      <p class="save-na-note">请关闭原 Narrative Agent、Horae、内置总结和其他自动裁剪功能。默认每轮有 3 次 API 请求；启用原文召回通常为 4 次，接入旧聊天时可能额外补摘要。费用应包含全部请求。</p>
+      <p class="save-na-note">请关闭原 Narrative Agent 和其他自动裁剪功能。默认每轮通常 3 次请求，召回通常 4 次；首次开场分析和技术故障恢复另计。旧历史不会自动批量分析。费用需合计全部请求。</p>
       <p id="save-na-status" role="status"></p>
       <details id="save-na-details"><summary>当前摘要与本轮执行记录</summary><pre id="save-na-preview"></pre></details>
       <button type="button" class="menu_button save-na-button" id="save-na-refresh">刷新执行记录</button>
       <button type="button" class="menu_button save-na-button" id="save-na-export">导出执行记录</button>
       <button type="button" class="menu_button save-na-button" id="save-na-recovery">导出未保存备份</button>
       <button type="button" class="menu_button save-na-button" id="save-na-retry-save">重试保存当前聊天</button>
-      <button type="button" class="menu_button save-na-button" id="save-na-reset">清除当前聊天的 Save 摘要</button>
     </div></div>`;
   const enabled = panel.querySelector('#save-na-enabled'); enabled.checked = config.enabled;
   const recall = panel.querySelector('#save-na-recall'); recall.checked = config.pipeline.enableTextRecall;
@@ -72,21 +71,9 @@ export function mountSettings({ config, bridge, onConfig, getStatus }) {
   panel.querySelector('#save-na-refresh').addEventListener('click', refresh);
   panel.querySelector('#save-na-details').addEventListener('toggle', refresh);
   panel.querySelector('#save-na-export').addEventListener('click', () => {
-    const blob = new Blob([JSON.stringify({ version:'0.2.3', ...bridge.lastRun }, null, 2)], {type:'application/json'});
+    const blob = new Blob([JSON.stringify({ version:'0.3.0', ...bridge.lastRun }, null, 2)], {type:'application/json'});
     const url = URL.createObjectURL(blob); const a = document.createElement('a');
     a.href = url; a.download = 'save-run-log.json'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
-  });
-  panel.querySelector('#save-na-reset').addEventListener('click', async () => {
-    if (bridge.isPipelineRunning || bridge._pending?.intercepted) return;
-    const ctx = getSTContext();
-    const records = ctx.chat.map(m => m.extra?.[MESSAGE_KEY]);
-    for (const m of ctx.chat) {
-      if (m.extra?.[MESSAGE_KEY]?.schema === 2) delete m.extra[MESSAGE_KEY];
-      for (const info of m.swipe_info || []) if (info?.extra) delete info.extra[MESSAGE_KEY];
-    }
-    try { await ctx.saveChat?.(); }
-    catch (e) { ctx.chat.forEach((m,i) => { if (records[i]) { m.extra ??= {}; m.extra[MESSAGE_KEY] = records[i]; } }); }
-    refresh();
   });
   panel.querySelector('#save-na-recovery').addEventListener('click',()=>{
     const contents=bridge.persistence.exportText();

@@ -6,7 +6,7 @@ export async function runWritingAgent(ctx) {
 
   let systemContent = "";
 
-  if (!ctx.presetMessages && ctx.writingSystemPreset) {
+  if (ctx.writingSystemPreset) {
     systemContent += ctx.writingSystemPreset;
   }
 
@@ -18,7 +18,6 @@ export async function runWritingAgent(ctx) {
   if (systemContent) systemContent += "\n\n";
   systemContent += WRITING_SYSTEM_SUFFIX;
 
-
   const formatTurn = (t) => {
     if (!t.user) {
       return `[\u8f6e${t.turnNum}] AI: ${t.assistant}`;
@@ -29,7 +28,7 @@ export async function runWritingAgent(ctx) {
 
   let userContent = "";
 
-  if (!ctx.presetMessages && ctx.writingUserPreset) {
+  if (ctx.writingUserPreset) {
     userContent += "<user_preset>\n" + ctx.writingUserPreset + "\n</user_preset>";
   }
 
@@ -64,11 +63,9 @@ export async function runWritingAgent(ctx) {
   guideBlock += "\n</writing_guide>";
   userContent += "\n\n" + guideBlock;
 
-
   userContent += `\n\n<user_input>\n${ctx.userInput}\n</user_input>`;
 
   const messages = [
-    ...(ctx.presetMessages || []).map(m => ({...m})),
     { role: "system", content: systemContent },
     { role: "user", content: userContent },
   ];
@@ -80,7 +77,7 @@ export async function runWritingAgent(ctx) {
 export async function runMergedWritingAgent(ctx) {
   let systemContent = "";
 
-  if (!ctx.presetMessages && ctx.presetContext) {
+  if (ctx.presetContext) {
     systemContent += ctx.presetContext;
   }
 
@@ -102,7 +99,7 @@ export async function runMergedWritingAgent(ctx) {
 
   let userContent = "";
 
-  if (!ctx.presetMessages && ctx.writingUserPreset) {
+  if (ctx.writingUserPreset) {
     userContent += "<user_preset>\n" + ctx.writingUserPreset + "\n</user_preset>";
   }
 
@@ -132,9 +129,7 @@ export async function runMergedWritingAgent(ctx) {
 
   userContent += `\n\n<user_input>\n${ctx.userInput}\n</user_input>`;
 
-
   const messages = [
-    ...(ctx.presetMessages || []).map(m => ({...m})),
     { role: "system", content: systemContent },
     { role: "user", content: userContent },
   ];
