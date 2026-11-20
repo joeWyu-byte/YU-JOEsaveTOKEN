@@ -1,9 +1,9 @@
 {
-    "display_name": "Save · 原版最小补丁",
-    "id": "narrative-agent",
+    "display_name": "Save · 原版请求对齐版",
+    "id": "save-original-minimal",
     "api": 2,
-    "version": "0.4.0",
-    "description": "基于 Narrative Agent 原版：隐藏末尾摘要显示，不读取世界书，保留角色卡。",
+    "version": "0.4.1",
+    "description": "原版请求流程：隐藏末尾三项，不读世界书，不额外注入角色卡，独立启用开关。",
     "author": "Lol1p0p；按 Yu 的需求定制",
     "tags": ["agent", "narrative", "pipeline"],
     "js": "index.js",

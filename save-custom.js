@@ -1,6 +1,5 @@
 // Yu's requested changes, isolated from the original generation engine.
 import { WorldInfoResolver as OriginalWorldInfoResolver } from './worldbook.js';
-import { CharacterReader } from './readers.js';
 import { getSTContext } from './utils.js';
 
 export class WorldInfoResolver extends OriginalWorldInfoResolver {
@@ -15,11 +14,18 @@ export class WorldInfoResolver extends OriginalWorldInfoResolver {
   _getWorldName() { return ''; }
   _trySyncBuildFormattingSet() { this._formattingContentSet = new Set(); }
 
-  // Keep the role card through the original reader and existing context slot.
-  // This reads character fields, not character_book entries.
-  async getConstantBeforeCharEntries() {
-    const text = await new CharacterReader().getFullInfo();
-    return text ? [`<character_card>\n${text}\n</character_card>`] : [];
+}
+
+let relayCount = 0;
+export function getTakeoverStatus(enabled) {
+  if (!enabled) return '接管已关闭：当前使用酒馆原生请求';
+  return relayCount ? `接管已开启：本页已接管 ${relayCount} 次` : '接管已开启：等待发送';
+}
+export function noteRelayRequest() {
+  relayCount++;
+  if (typeof document !== 'undefined') {
+    const status = document.querySelector('#save_original_takeover_status');
+    if (status) status.textContent = getTakeoverStatus(true);
   }
 }
 

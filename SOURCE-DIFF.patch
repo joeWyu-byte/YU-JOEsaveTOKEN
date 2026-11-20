@@ -3,11 +3,19 @@
 @@ -1,5 +1,6 @@
  import { getSTContext, extractPresetContext, getLatestUserInput, isApiFailure } from "./utils.js";
  import { PLACEHOLDER } from "./constants.js";
-+import { applySummaryDisplay } from "./save-custom.js";
++import { applySummaryDisplay, noteRelayRequest } from "./save-custom.js";
  
  export class SillyTavernBridge {
    constructor(orchestrator) {
-@@ -146,6 +147,7 @@
+@@ -100,6 +101,7 @@
+     data.chat.push({ role: "system", content: "You are a relay. You must output exactly the following text and nothing else: " + PLACEHOLDER });
+     data.chat.push({ role: "user", content: "Relay the designated text now." });
+     this.wasIntercepted = true;
++    if (!data.dryRun) noteRelayRequest();
+   }
+ 
+   async _onGenerationEnded() {
+@@ -146,6 +148,7 @@
          const msg = chat[lastMsgIndex];
          if (msg && !msg.is_user) {
            msg.mes = status;
@@ -15,7 +23,7 @@
            try { ctx.updateMessageBlock(lastMsgIndex, msg); } catch (e) { /* ignore */ }
          }
        });
-@@ -158,6 +160,7 @@
+@@ -158,6 +161,7 @@
          lastMsg.extra.state_panel = null;
          lastMsg.extra.writing_guide = result.writingGuide;
          lastMsg.extra.events = result.events;
@@ -23,7 +31,7 @@
          ctx.updateMessageBlock(chat.length - 1, lastMsg);
        }
  
-@@ -181,6 +184,7 @@
+@@ -181,6 +185,7 @@
          } else {
            lastMsg.mes = "工作流执行异常，请检查控制台日志。";
          }
@@ -31,7 +39,7 @@
          ctx.updateMessageBlock(chat.length - 1, lastMsg);
        }
        try { ctx.eventSource.emit(ctx.eventTypes.MESSAGE_EDITED, chat.length - 1); } catch {}
-@@ -197,4 +201,4 @@
+@@ -197,4 +202,4 @@
        this.isPipelineRunning = false;
      }
    }
@@ -40,16 +48,21 @@
 +}
 --- a/index.js
 +++ b/index.js
-@@ -2,7 +2,7 @@
+@@ -2,10 +2,11 @@
  import { StateManager, SummaryStore } from "./state.js";
  import { FileManager } from "./store.js";
  import { CharacterReader, UserPersonaReader } from "./readers.js";
 -import { WorldInfoResolver } from "./worldbook.js";
-+import { WorldInfoResolver, installSummaryDisplay, renderLocalSettings } from "./save-custom.js";
++import { WorldInfoResolver, installSummaryDisplay, renderLocalSettings, getTakeoverStatus } from "./save-custom.js";
  import { Orchestrator } from "./orchestrator.js";
  import { SillyTavernBridge } from "./bridge.js";
- import { loadConfig, saveConfig, loadOrCreateState, loadOrCreateSummary, persistState } from "./settings.js";
-@@ -16,6 +16,7 @@
+-import { loadConfig, saveConfig, loadOrCreateState, loadOrCreateSummary, persistState } from "./settings.js";
++import { loadOrCreateState, loadOrCreateSummary, persistState } from "./settings.js";
++import { loadConfig, saveConfig } from "./settings-custom.js";
+ import { getSTContext, getConversationId, deepMerge } from "./utils.js";
+ 
+ let orchestrator = null;
+@@ -16,6 +17,7 @@
  async function initExtension() {
    console.log("[NarrativeAgent] Initializing...");
    config = loadConfig();
@@ -57,7 +70,7 @@
  
    currentChatId = getConversationId();
    const stateManager = loadOrCreateState(currentChatId);
-@@ -111,9 +112,7 @@
+@@ -111,9 +113,7 @@
  async function registerSettingsPane() {
    try {
      const ctx = getSTContext();
@@ -68,7 +81,7 @@
      const $html = $(html);
  
      $html.find("#na_enabled").prop("checked", config.enabled);
-@@ -249,7 +248,7 @@
+@@ -249,7 +249,7 @@
      });
  
      $html.find("#na_open_tutorial").on("click", function () {
@@ -77,7 +90,16 @@
      });
  
      $("#extensions_settings").append($html);
-@@ -280,4 +279,4 @@
+@@ -258,6 +258,8 @@
+ }
+ 
+ function refreshStateDisplay($html) {
++  const $root = $html || $("#narrative_agent_settings");
++  $root.find("#save_original_takeover_status").text(getTakeoverStatus(config.enabled));
+   const $display = $html ? $html.find("#na_state_display") : $("#na_state_display");
+   if ($display.length && orchestrator) {
+     const summary = orchestrator.stateManager.getSummary();
+@@ -280,4 +282,4 @@
        if (typeof $ !== "undefined") { clearInterval(interval); $(bootstrap); }
      }, 100);
    }
@@ -89,26 +111,27 @@
 @@ -1,10 +1,10 @@
  {
 -    "display_name": "Narrative Agent",
-+    "display_name": "Save · 原版最小补丁",
-     "id": "narrative-agent",
+-    "id": "narrative-agent",
++    "display_name": "Save · 原版请求对齐版",
++    "id": "save-original-minimal",
      "api": 2,
 -    "version": "0.2.1",
 -    "description": "多Agent叙事系统v0.2.1：规划/工具执行/写作/合并分析",
 -    "author": "Lol1p0p",
-+    "version": "0.4.0",
-+    "description": "基于 Narrative Agent 原版：隐藏末尾摘要显示，不读取世界书，保留角色卡。",
++    "version": "0.4.1",
++    "description": "原版请求流程：隐藏末尾三项，不读世界书，不额外注入角色卡，独立启用开关。",
 +    "author": "Lol1p0p；按 Yu 的需求定制",
      "tags": ["agent", "narrative", "pipeline"],
      "js": "index.js",
      "css": "style.css"
 --- a/settings.html
 +++ b/settings.html
-@@ -1,11 +1,11 @@
+@@ -1,17 +1,18 @@
  <div id="narrative_agent_settings">
      <div class="inline-drawer">
          <div class="inline-drawer-toggle inline-drawer-header">
 -            <b>Narrative Agent</b>
-+            <b>Save 0.4.0 · 原版最小补丁</b>
++            <b>Save 0.4.1 · 原版请求对齐版</b>
              <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
          </div>
          <div class="inline-drawer-content">
@@ -117,7 +140,14 @@
  
              <label class="checkbox_label">
                  <input type="checkbox" id="na_enabled" name="na_enabled">
-@@ -28,16 +28,8 @@
+                 <span>启用多Agent叙事系统</span>
+             </label>
+             <small>启用后，消息发送将经过多Agent流水线（规划 → 工具执行 → 写作 → 合并分析）处理。</small>
++            <div><small id="save_original_takeover_status"></small></div>
+ 
+             <hr>
+ 
+@@ -28,16 +29,8 @@
  
              <hr>
  
@@ -132,11 +162,11 @@
 -            </div>
 -            <small>选择世界书条目的加载来源。卡包内嵌模式适用于已通过 narrative-agent-worldbook skill 规范化并嵌入卡包的世界书。</small>
 +            <h4>本次定制</h4>
-+            <small>不读取角色卡内嵌及外部世界书。角色卡和用户设定保留；回复末尾的轮次、用户意图、叙事要点仅隐藏显示，后台摘要照常保存和使用。</small>
++            <small>不读取内嵌及外部世界书；角色信息、用户设定和预设的处理沿用原版，不额外注入角色卡全文。末尾三项只隐藏显示，后台摘要保留。</small>
  
              <hr>
  
-@@ -62,7 +54,6 @@
+@@ -62,7 +55,6 @@
              <div style="margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px;">
                  <input type="button" class="menu_button" id="na_reset_state" value="重置状态">
                  <input type="button" class="menu_button" id="na_refresh_state" value="刷新显示">
@@ -146,10 +176,9 @@
              </div>
 --- /dev/null
 +++ b/save-custom.js
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,108 @@
 +// Yu's requested changes, isolated from the original generation engine.
 +import { WorldInfoResolver as OriginalWorldInfoResolver } from './worldbook.js';
-+import { CharacterReader } from './readers.js';
 +import { getSTContext } from './utils.js';
 +
 +export class WorldInfoResolver extends OriginalWorldInfoResolver {
@@ -164,11 +193,18 @@
 +  _getWorldName() { return ''; }
 +  _trySyncBuildFormattingSet() { this._formattingContentSet = new Set(); }
 +
-+  // Keep the role card through the original reader and existing context slot.
-+  // This reads character fields, not character_book entries.
-+  async getConstantBeforeCharEntries() {
-+    const text = await new CharacterReader().getFullInfo();
-+    return text ? [`<character_card>\n${text}\n</character_card>`] : [];
++}
++
++let relayCount = 0;
++export function getTakeoverStatus(enabled) {
++  if (!enabled) return '接管已关闭：当前使用酒馆原生请求';
++  return relayCount ? `接管已开启：本页已接管 ${relayCount} 次` : '接管已开启：等待发送';
++}
++export function noteRelayRequest() {
++  relayCount++;
++  if (typeof document !== 'undefined') {
++    const status = document.querySelector('#save_original_takeover_status');
++    if (status) status.textContent = getTakeoverStatus(true);
 +  }
 +}
 +
@@ -248,4 +284,35 @@
 +    render = native.renderExtensionTemplateAsync;
 +  }
 +  return await render(`third-party/${folder}`, 'settings');
++}
+--- /dev/null
++++ b/settings-custom.js
+@@ -0,0 +1,28 @@
++// Keep the original state/summary store, but isolate the takeover preference.
++import { getSTContext, deepMerge } from './utils.js';
++import { DEFAULT_CONFIG, EXTENSION_ID } from './constants.js';
++export const CONFIG_ID = 'save-original-minimal';
++
++export function loadConfig() {
++  const defaults = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
++  const ctx = getSTContext();
++  const own = ctx?.extensionSettings?.[CONFIG_ID]?.config;
++  if (own && typeof own === 'object') return deepMerge(defaults, own);
++
++  // Preserve other original preferences without inheriting "original disabled".
++  const original = ctx?.extensionSettings?.[EXTENSION_ID]?.config;
++  if (!original || typeof original !== 'object') return defaults;
++  const inherited = JSON.parse(JSON.stringify(original));
++  delete inherited.enabled;
++  return deepMerge(defaults, inherited);
++}
++
++export function saveConfig(config) {
++  const ctx = getSTContext();
++  if (!ctx) return;
++  ctx.extensionSettings ??= {};
++  ctx.extensionSettings[CONFIG_ID] ??= {};
++  ctx.extensionSettings[CONFIG_ID].config = config;
++  ctx.extensionSettings[CONFIG_ID].enabled = config.enabled;
++  ctx.saveSettingsDebounced?.();
 +}

@@ -1,12 +1,10 @@
 {
-  "project": "Lol1p0p/narrative-agent",
   "source": "https://github.com/Lol1p0p/narrative-agent.git",
   "upstreamCommit": "29a86d7323eb409131fdb28d926e3ea451eccb5c",
   "upstreamVersion": "0.2.1",
-  "customVersion": "0.4.0",
-  "headVerifiedOn": "2026-11-20",
+  "customVersion": "0.4.1",
   "hashAlgorithm": "sha256",
-  "hashBytes": "Checked-out source bytes (Git for Windows CRLF checkout)",
+  "hashBytes": "Git for Windows checkout bytes",
   "upstreamFileHashes": {
     "agent-analysis.js": "cb43bb8c26cd89c87c0d0fd20bdab163df0c98386151f8e647caa24cc16f57e8",
     "agent-planning.js": "e1b2448bd47a4a89a1c988f26b7594ce7356ff6c436ea53f8ab9551d5fbc5a4b",
@@ -34,17 +32,5 @@
     "utils.js": "a321fd4c79d083c515ff6d7c7b2967ec604202230f17e370c34db8c92f0af81c",
     "worldbook.js": "fc37e794deb5869f35c61881053790f5181a8bbdb8d16026368ad8602a933226"
   },
-  "modifiedOriginalRuntimeFiles": [
-    "index.js",
-    "bridge.js"
-  ],
-  "addedRuntimeFiles": [
-    "save-custom.js"
-  ],
-  "modifiedOriginalMetadataAndUI": [
-    "manifest.json",
-    "settings.html"
-  ],
-  "unchangedOriginalJavaScriptFiles": 17,
-  "READMEOriginalPreservedAs": "UPSTREAM-README.md"
+  "unchangedOriginalJavaScriptFiles": 17
 }

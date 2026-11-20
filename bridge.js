@@ -1,6 +1,6 @@
 import { getSTContext, extractPresetContext, getLatestUserInput, isApiFailure } from "./utils.js";
 import { PLACEHOLDER } from "./constants.js";
-import { applySummaryDisplay } from "./save-custom.js";
+import { applySummaryDisplay, noteRelayRequest } from "./save-custom.js";
 
 export class SillyTavernBridge {
   constructor(orchestrator) {
@@ -101,6 +101,7 @@ export class SillyTavernBridge {
     data.chat.push({ role: "system", content: "You are a relay. You must output exactly the following text and nothing else: " + PLACEHOLDER });
     data.chat.push({ role: "user", content: "Relay the designated text now." });
     this.wasIntercepted = true;
+    if (!data.dryRun) noteRelayRequest();
   }
 
   async _onGenerationEnded() {

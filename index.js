@@ -2,10 +2,11 @@ import { PLACEHOLDER, EXTENSION_ID, DEFAULT_CONFIG } from "./constants.js";
 import { StateManager, SummaryStore } from "./state.js";
 import { FileManager } from "./store.js";
 import { CharacterReader, UserPersonaReader } from "./readers.js";
-import { WorldInfoResolver, installSummaryDisplay, renderLocalSettings } from "./save-custom.js";
+import { WorldInfoResolver, installSummaryDisplay, renderLocalSettings, getTakeoverStatus } from "./save-custom.js";
 import { Orchestrator } from "./orchestrator.js";
 import { SillyTavernBridge } from "./bridge.js";
-import { loadConfig, saveConfig, loadOrCreateState, loadOrCreateSummary, persistState } from "./settings.js";
+import { loadOrCreateState, loadOrCreateSummary, persistState } from "./settings.js";
+import { loadConfig, saveConfig } from "./settings-custom.js";
 import { getSTContext, getConversationId, deepMerge } from "./utils.js";
 
 let orchestrator = null;
@@ -257,6 +258,8 @@ async function registerSettingsPane() {
 }
 
 function refreshStateDisplay($html) {
+  const $root = $html || $("#narrative_agent_settings");
+  $root.find("#save_original_takeover_status").text(getTakeoverStatus(config.enabled));
   const $display = $html ? $html.find("#na_state_display") : $("#na_state_display");
   if ($display.length && orchestrator) {
     const summary = orchestrator.stateManager.getSummary();
