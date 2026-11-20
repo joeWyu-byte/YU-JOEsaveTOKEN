@@ -36,16 +36,16 @@ function displayHash(text) {
   return (value >>> 0).toString(16);
 }
 
-export function withoutSummaryFooter(raw) {
+export function withoutSummaryFooter(raw, allowBodyOnly = false) {
   if (typeof raw !== 'string') return null;
   const opening = /^\s*<context>\s*\n?/i.exec(raw);
   const close = raw.toLowerCase().lastIndexOf('</context>');
   if (!opening || close < opening[0].length) return null;
   const tail = raw.slice(close + '</context>'.length);
   const footer = /^\s*<summary>[\s\S]*?<\/summary>/i.exec(tail);
-  if (!footer) return null;
+  if (!footer && (!allowBodyOnly || tail.trim())) return null;
   const narrative = raw.slice(opening[0].length, close).trim();
-  const after = tail.slice(footer[0].length).trim();
+  const after = footer ? tail.slice(footer[0].length).trim() : '';
   return [narrative, after].filter(Boolean).join('\n\n');
 }
 
@@ -62,7 +62,7 @@ export function applySummaryDisplay(message) {
     return false;
   }
 
-  const preview = withoutSummaryFooter(message.mes);
+  const preview = withoutSummaryFooter(message.mes, extra?.save_native_writer === 1);
   if (preview === null) {
     if (!ownsDisplay) return false;
     delete extra.display_text;

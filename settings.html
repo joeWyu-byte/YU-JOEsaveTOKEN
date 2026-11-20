@@ -1,7 +1,7 @@
 <div id="narrative_agent_settings">
     <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-            <b>Save 0.4.1 · 原版请求对齐版</b>
+            <b>Save 0.5.0 · 原生聊天版</b>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
@@ -9,14 +9,16 @@
 
             <label class="checkbox_label">
                 <input type="checkbox" id="na_enabled" name="na_enabled">
-                <span>启用多Agent叙事系统</span>
+                <span>启用省 Token 聊天</span>
             </label>
-            <small>启用后，消息发送将经过多Agent流水线（规划 → 工具执行 → 写作 → 合并分析）处理。</small>
+            <small>保留酒馆本轮的角色卡和已启用预设；旧历史使用原版窗口和摘要压缩。</small>
             <div><small id="save_original_takeover_status"></small></div>
+            <div><small id="save_run_status" role="status" aria-live="polite">等待发送</small></div>
+            <input type="button" class="menu_button" id="save_export_run" value="导出执行记录">
 
             <hr>
 
-            <h4>预设处理模式</h4>
+            <h4>后台规划预设</h4>
             <div class="flex-container">
                 <label>模式:</label>
                 <select id="na_preset_mode" style="width: 200px;">
@@ -25,12 +27,12 @@
                     <option value="adapted" disabled>适配注入（开发中）</option>
                 </select>
             </div>
-            <small>选择如何处理酒馆预设中的提示词。分割注入模式会将系统提示注入规划Agent、用户提示注入写作Agent。</small>
+            <small>此选项只影响原文召回的后台规划；实际回复始终使用酒馆本轮已启用的原生预设。</small>
 
             <hr>
 
             <h4>本次定制</h4>
-            <small>不读取内嵌及外部世界书；角色信息、用户设定和预设的处理沿用原版，不额外注入角色卡全文。末尾三项只隐藏显示，后台摘要保留。</small>
+            <small>不注入世界书；正文使用酒馆已编译的角色卡、用户设定和预设，不额外增加文风或思考指令。隐藏末尾三项，后台摘要保留；进度只在此面板显示。</small>
 
             <hr>
 

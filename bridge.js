@@ -1,6 +1,12 @@
-import { getSTContext, extractPresetContext, getLatestUserInput, isApiFailure } from "./utils.js";
-import { PLACEHOLDER } from "./constants.js";
-import { applySummaryDisplay, noteRelayRequest } from "./save-custom.js";
+import { getSTContext, extractPresetContext, getLatestUserInput, getConversationId } from './utils.js';
+import { PLACEHOLDER } from './constants.js';
+import { applySummaryDisplay, noteRelayRequest } from './save-custom.js';
+import { takeNativePromptSnapshot } from './native-chat.js';
+import { startGenerationSession, endGenerationSession } from './generation-session.js';
+import { replaceWriterMetadata } from './response-adapter.js';
+
+const copy = value => JSON.parse(JSON.stringify(value));
+const envelope = body => `<context>\n${body}\n</context>`;
 
 export class SillyTavernBridge {
   constructor(orchestrator) {
@@ -9,197 +15,288 @@ export class SillyTavernBridge {
     this.wasIntercepted = false;
     this.isPipelineRunning = false;
     this._aborted = false;
-    this._generationType = null;
-    this._savedUserInput = null;
-    this._generationCompleted = true;
     this._pipelineCompleteCbs = [];
-    this._stopEventHandler = null;
-    this._boundOnPromptReady = this._onPromptReady.bind(this);
-    this._boundOnGenerationEnded = this._onGenerationEnded.bind(this);
-    this._boundOnGenerationStarted = this._onGenerationStarted.bind(this);
-    this._boundOnMessageDeleted = this._onMessageDeleted.bind(this);
+    this._listeners = [];
+    this._pending = null;
+    this._run = null;
+    this._settled = Promise.resolve();
   }
 
   onPipelineComplete(cb) { this._pipelineCompleteCbs.push(cb); }
-
   install() {
     const ctx = getSTContext();
-    if (!ctx) { console.error("[NarrativeAgent] ST context not available"); return; }
-    ctx.eventSource.on(ctx.eventTypes.CHAT_COMPLETION_PROMPT_READY, this._boundOnPromptReady);
-    ctx.eventSource.on(ctx.eventTypes.GENERATION_ENDED, this._boundOnGenerationEnded);
-    ctx.eventSource.on(ctx.eventTypes.GENERATION_STARTED, this._boundOnGenerationStarted);
-    ctx.eventSource.on(ctx.eventTypes.MESSAGE_DELETED, this._boundOnMessageDeleted);
-    console.log("[NarrativeAgent] Bridge installed, enabled:", this.enabled);
+    const on = (key, handler) => {
+      if (!ctx.eventTypes[key]) return;
+      const bound = handler.bind(this);
+      ctx.eventSource.on(ctx.eventTypes[key], bound);
+      this._listeners.push([ctx.eventTypes[key], bound]);
+    };
+    on('GENERATION_STARTED', this._onGenerationStarted);
+    on('CHAT_COMPLETION_PROMPT_READY', this._onPromptReady);
+    on('GENERATION_ENDED', this._onGenerationEnded);
+    on('GENERATION_STOPPED', function () {
+      if (!this.enabled && !this.isPipelineRunning && !this.wasIntercepted) return;
+      this.cancel('已停止');
+      this.status('已停止');
+    });
+    on('CHAT_CHANGED', function () { this.cancel('已切换聊天'); });
+    on('MESSAGE_DELETED', function (length) {
+      if (this.isPipelineRunning) { this.cancel('消息已删除'); return; }
+      if (this.enabled && length <= 1) this.orchestrator.rollbackToTurn(0);
+      else this.orchestrator.invalidatePrefetch();
+    });
+    on('MESSAGE_EDITED', function (index) {
+      if (!this._internalUpdate && this._run?.target === getSTContext()?.chat?.[Number(index)]) this.cancel('回复已被编辑');
+    });
   }
-
   uninstall() {
+    this.cancel('插件已关闭');
     const ctx = getSTContext();
-    if (!ctx) return;
-    ctx.eventSource.removeListener(ctx.eventTypes.CHAT_COMPLETION_PROMPT_READY, this._boundOnPromptReady);
-    ctx.eventSource.removeListener(ctx.eventTypes.GENERATION_ENDED, this._boundOnGenerationEnded);
-    ctx.eventSource.removeListener(ctx.eventTypes.GENERATION_STARTED, this._boundOnGenerationStarted);
-    ctx.eventSource.removeListener(ctx.eventTypes.MESSAGE_DELETED, this._boundOnMessageDeleted);
+    for (const [event, fn] of this._listeners) ctx?.eventSource.removeListener(event, fn);
+    this._listeners = [];
   }
 
-  _onGenerationStarted(type) {
-    this._generationType = type;
-    this._generationCompleted = false;
-    console.log("[NarrativeAgent] GENERATION_STARTED, type:", type);
+  status(text, error = false) {
+    const el = typeof document === 'undefined' ? null : document.querySelector('#save_run_status');
+    if (el) el.textContent = text;
+    this.lastStatus = text;
+    if (error && typeof toastr !== 'undefined') toastr.warning(text, 'Save');
   }
 
-  _onMessageDeleted(newChatLength) {
-    if (!this.enabled || this.isPipelineRunning) return;
-
-    if (newChatLength <= 1) {
-      console.log("[NarrativeAgent] MESSAGE_DELETED, chat near-empty, full reset. newChatLength:", newChatLength);
-      this.orchestrator.rollbackToTurn(0);
-      return;
+  _hideRelay(index) {
+    if (typeof document === 'undefined') return;
+    let style = document.querySelector('#save_pending_message');
+    if (!style) {
+      style = document.createElement('style'); style.id = 'save_pending_message';
+      document.head.append(style);
     }
+    style.textContent = `#chat .mes[mesid="${index}"] { display: none !important; }`;
+  }
+  _showReply() { document.querySelector?.('#save_pending_message')?.remove(); }
 
-    console.log("[NarrativeAgent] MESSAGE_DELETED, newChatLength:", newChatLength,
-      "turnCounter:", this.orchestrator.turnCounter, "— relay模式下聊天结构已变更，部分删除不触发回退");
-    this.orchestrator.invalidatePrefetch();
+  _lock() {
+    getSTContext()?.deactivateSendButtons?.();
+    $('#send_but, #option_regenerate, #option_continue, #mes_continue, #mes_impersonate').prop('disabled', true).css('pointer-events', 'none');
+    $('#mes_stop').css('display', 'flex');
+  }
+  _unlock() {
+    $('#send_but, #option_regenerate, #option_continue, #mes_continue, #mes_impersonate').prop('disabled', false).css('pointer-events', '');
+    getSTContext()?.activateSendButtons?.();
+    $('#mes_stop').css('display', 'none');
+    delete document.body.dataset.generating;
+  }
+
+  _onGenerationStarted(type, _options, dryRun) {
+    type = type || 'normal';
+    if (!this.enabled || dryRun || !['normal', 'regenerate', 'swipe', 'continue'].includes(type)) return;
+    if (this.isPipelineRunning) throw new Error('Save 上一轮仍在处理，请先停止');
+    const ctx = getSTContext();
+    const last = ctx.chat.at(-1);
+    this._aborted = false;
+    this._pending = {
+      type, chat: ctx.chat, chatId: getConversationId(),
+      prior: type !== 'normal' && last && !last.is_user ? copy(last) : null,
+      priorIndex: ctx.chat.length - 1,
+    };
   }
 
   _onPromptReady(data) {
-    if (!this.enabled || this.isPipelineRunning) return;
-    this._aborted = false;
-    console.log("[NarrativeAgent] 拦截 CHAT_COMPLETION_PROMPT_READY, 原始消息数:", data.chat?.length);
-
-    if (data.chat && data.chat.length > 0) {
-      const sample = data.chat[0];
-      console.log("[NA:bridge] data.chat[0] keys:", Object.keys(sample), "hasMes:", "mes" in sample, "hasContent:", "content" in sample, "hasIs_user:", "is_user" in sample, "hasRole:", "role" in sample);
-      console.log("[NA:bridge] data.chat[0] role:", sample.role, "is_user:", sample.is_user, "mes首80字:", sample.mes?.substring(0, 80), "content首80字:", sample.content?.substring(0, 80));
-    }
-
-    this.orchestrator.worldInfoResolver.buildFormattingSet().catch(e => console.warn("[NA] buildFormattingSet in _onPromptReady failed:", e.message));
-
+    if (!this.enabled || this.isPipelineRunning || !this._pending || !Array.isArray(data.chat)) return;
     const ctx = getSTContext();
-    const rawChat = ctx?.chat || [];
-    console.log("[NA:bridge] ctx.chat (前端展示消息) 长度:", rawChat.length);
-    if (rawChat.length > 0) {
-      const rawSample = rawChat[0];
-      console.log("[NA:bridge] ctx.chat[0] keys:", Object.keys(rawSample), "is_user:", rawSample.is_user, "mes长度:", rawSample.mes?.length);
+    if (this._pending.chat !== ctx.chat) return;
+    const snapshot = takeNativePromptSnapshot(ctx);
+    if (!data.dryRun && !snapshot) {
+      this.status('原生提示未能读取，本轮使用酒馆原生生成；请检查扩展兼容性', true);
+      this._pending = null;
+      return;
     }
-
-    this._savedUserInput = getLatestUserInput(rawChat);
-    console.log("[NarrativeAgent] 已保存用户输入:", this._savedUserInput?.substring(0, 80), "长度:", this._savedUserInput?.length);
-
-    const { turns } = this.orchestrator._extractTurnHistoryFromChat(rawChat);
-    this.orchestrator.applyChatExtractedContext(turns);
-    console.log("[NarrativeAgent] 从chat提取轮次:", turns.length);
-
-    if (this.orchestrator.config.presetMode === "split") {
-      const presetCtx = extractPresetContext();
-      this.orchestrator.setPresetContext(presetCtx);
-      console.log("[NarrativeAgent] 预设上下文已提取, planningContext长度:", presetCtx.planningContext.length, "writingSystemContext长度:", presetCtx.writingSystemContext.length, "writingUserContext长度:", presetCtx.writingUserContext.length);
-    } else {
-      this.orchestrator.setPresetContext(null);
+    if (!data.dryRun) {
+      const raw = ctx.chat;
+      const { turns } = this.orchestrator._extractTurnHistoryFromChat(raw);
+      this.orchestrator.applyChatExtractedContext(turns);
+      this.orchestrator.setPresetContext(this.orchestrator.config.presetMode === 'split' ? extractPresetContext() : null);
+      const last = raw.at(-1);
+      Object.assign(this._pending, {
+        snapshot, turns, userInput: getLatestUserInput(raw),
+        targetIndex: this._pending.type !== 'normal' && last && !last.is_user ? raw.length - 1 : raw.length,
+      });
+      this._hideRelay(this._pending.targetIndex);
+      this.wasIntercepted = true;
+      noteRelayRequest();
+      this.status('正在生成回复');
     }
+    data.chat.splice(0, data.chat.length,
+      { role: 'system', content: 'You are a relay. You must output exactly the following text and nothing else: ' + PLACEHOLDER },
+      { role: 'user', content: 'Relay the designated text now.' });
+  }
 
-    data.chat.splice(0, data.chat.length);
-    data.chat.push({ role: "system", content: "You are a relay. You must output exactly the following text and nothing else: " + PLACEHOLDER });
-    data.chat.push({ role: "user", content: "Relay the designated text now." });
-    this.wasIntercepted = true;
-    if (!data.dryRun) noteRelayRequest();
+  cancel(reason = '已停止') {
+    this._aborted = true;
+    this.orchestrator._shouldCancel = true;
+    this._run?.cancel(reason);
+    if (!this.isPipelineRunning && this._pending) {
+      this.wasIntercepted = false;
+      this._pending.cancelReason = reason;
+    }
+  }
+  async waitForIdle() { await this._settled; }
+
+  _syncSwipe(message) {
+    if (!Array.isArray(message.swipes)) return;
+    const index = message.swipe_id ?? 0;
+    message.swipes[index] = message.mes;
+    if (Array.isArray(message.swipe_info)) message.swipe_info[index] = {
+      ...(message.swipe_info[index] || {}), send_date: message.send_date,
+      gen_started: message.gen_started, gen_finished: message.gen_finished, extra: copy(message.extra || {}),
+    };
+  }
+
+  _render(run) {
+    run.assertActive();
+    const index = run.chat.indexOf(run.target);
+    applySummaryDisplay(run.target);
+    this._syncSwipe(run.target);
+    run.revision = run.target.mes;
+    run.context.updateMessageBlock(index, run.target);
+    run.context.updateReasoningUI?.(index);
+    this._showReply();
+  }
+
+  async _save(run) {
+    run.assertActive();
+    if (typeof run.context.saveChat !== 'function') throw new Error('当前酒馆没有提供保存接口');
+    run.saveAttempted = true;
+    let timer;
+    const originalFetch = globalThis.fetch;
+    const outcomes = [];
+    // ST catches save errors internally. Observe its actual HTTP result without
+    // changing requests, consuming responses, or writing through another API.
+    const observedFetch = async (...args) => {
+      const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || String(args[0]);
+      const isSave = /\/api\/(?:chats\/(?:group\/)?save|groupchats\/save)(?:[?#]|$)/.test(url);
+      try {
+        const result = await originalFetch.apply(globalThis, args);
+        if (isSave) outcomes.push({ ok: result.ok, status: result.status });
+        return result;
+      } catch (error) {
+        if (isSave) outcomes.push({ ok: false, status: 'network' });
+        throw error;
+      }
+    };
+    globalThis.fetch = observedFetch;
+    try {
+      await Promise.race([
+        run.context.saveChat(),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('保存未确认，请保留页面并重试保存')), run.saveTimeout ?? 15000); }),
+      ]);
+      const saved = outcomes.at(-1);
+      run.saveResult = saved ?? { ok: false, status: 'unconfirmed' };
+      if (!saved?.ok) throw new Error(saved ? `保存失败（${saved.status}），请保留页面并重试保存` : '保存结果未确认，请保留页面并重试保存');
+    } finally {
+      clearTimeout(timer);
+      if (globalThis.fetch === observedFetch) globalThis.fetch = originalFetch;
+    }
+  }
+
+  async _removeTemporary(pending, target) {
+    const ctx = getSTContext();
+    if (ctx?.chat !== pending.chat || getConversationId() !== pending.chatId || !target || target.is_user) return;
+    const index = ctx.chat.indexOf(target);
+    if (index < 0) return;
+    if (pending.prior) {
+      Object.keys(target).forEach(key => delete target[key]);
+      Object.assign(target, copy(pending.prior));
+      ctx.updateMessageBlock(index, target);
+      ctx.updateReasoningUI?.(index);
+    } else if (index === ctx.chat.length - 1) {
+      if (ctx.deleteLastMessage) await ctx.deleteLastMessage();
+      else ctx.chat.pop();
+    }
   }
 
   async _onGenerationEnded() {
-    this._generationCompleted = true;
-
-    if (!this.enabled || this.isPipelineRunning || !this.wasIntercepted || this._aborted) return;
-    this.wasIntercepted = false;
-
+    if (this.isPipelineRunning || !this._pending) return;
+    const pending = this._pending;
+    this._pending = null;
     const ctx = getSTContext();
-    if (!ctx) return;
-
-    const lastMsg = ctx.chat[ctx.chat.length - 1];
-    if (!lastMsg || lastMsg.is_user || !(lastMsg.mes || "").includes(PLACEHOLDER)) {
-      console.warn("[NarrativeAgent] 中继未正常完成（可能被用户取消或API错误），跳过Pipeline");
+    const target = pending.chat[pending.targetIndex];
+    if (!this.wasIntercepted || this._aborted || !target?.mes?.includes(PLACEHOLDER) || ctx.chat !== pending.chat) {
+      if (this.wasIntercepted || pending.cancelReason) await this._removeTemporary(pending, target);
+      this.wasIntercepted = false;
+      this._showReply();
+      if (pending.cancelReason) this.status(pending.cancelReason);
       return;
     }
-
+    this.wasIntercepted = false;
     this.isPipelineRunning = true;
-
-    // 切换 UI 到"生成中"状态：显示停止按钮，禁用发送路径
-    $('#send_but').prop('disabled', true).css('pointer-events', 'none');
-    $('#option_regenerate, #option_continue, #mes_continue, #mes_impersonate')
-      .prop('disabled', true).css('pointer-events', 'none');
-    $('#mes_stop').css('display', 'flex');
-    document.body.dataset.generating = 'true';
-    this._stopEventHandler = () => { this.orchestrator._shouldCancel = true; };
-    ctx.eventSource.on(ctx.eventTypes.GENERATION_STOPPED, this._stopEventHandler);
-
-    const chat = ctx.chat;
-    const isRegeneration = this._generationType === "swipe" || this._generationType === "regenerate";
-    this._generationType = null;
-
+    this.orchestrator._shouldCancel = false;
+    this._lock();
+    for (const key of ['reasoning', 'reasoning_display_text', 'reasoning_duration', 'reasoning_signature', 'token_count', 'time_to_first_token']) delete (target.extra || {})[key];
+    let resolveIdle;
+    this._settled = new Promise(resolve => { resolveIdle = resolve; });
+    const run = startGenerationSession({
+      context: ctx, chat: pending.chat, chatId: pending.chatId, target,
+      snapshot: pending.snapshot, turns: pending.turns, orchestrator: this.orchestrator,
+      revision: target.mes,
+      isCurrent: () => getSTContext()?.chat === pending.chat && getConversationId() === pending.chatId && pending.chat.includes(target) && (!this._run || target.mes === this._run.revision),
+      onStatus: text => this.status(text),
+      onWriter: response => {
+        run.assertActive();
+        let text = response.text.trim();
+        if (pending.type === 'continue' && pending.prior) text = (pending.prior.extra?.display_text ?? pending.prior.mes) + text;
+        run.body = text;
+        target.mes = envelope(text);
+        run.revision = target.mes;
+        replaceWriterMetadata(target, response, ctx);
+        target.extra.save_native_writer = 1;
+        this._render(run);
+        return text;
+      },
+    });
+    this._run = run;
+    this.orchestrator.onProgress(() => {});
     try {
-      let userInput = getLatestUserInput(chat);
-      if (!userInput && this._savedUserInput) {
-        userInput = this._savedUserInput;
-        console.log("[NarrativeAgent] 使用保存的用户输入:", userInput?.substring(0, 80));
+      const result = await this.orchestrator.pipeline(pending.userInput, ['swipe', 'regenerate', 'continue'].includes(pending.type), pending.chat);
+      run.assertActive();
+      if (!run.writer || !run.body) throw new Error('本轮未收到实际回复');
+      target.mes = pending.type === 'continue'
+        ? (result.finalOutput || envelope(run.body)).replace(envelope(result.narrative), envelope(run.body))
+        : result.finalOutput || envelope(run.body);
+      run.revision = target.mes;
+      target.extra.state_panel = null;
+      target.extra.writing_guide = result.writingGuide;
+      target.extra.events = result.events;
+      this._render(run);
+      for (const cb of this._pipelineCompleteCbs) { run.assertActive(); await cb(result); }
+      await this._save(run);
+      run.assertActive();
+      this._internalUpdate = true;
+      try {
+        const index = run.chat.indexOf(target);
+        for (const key of ['MESSAGE_EDITED', 'MESSAGE_UPDATED', 'CHARACTER_MESSAGE_RENDERED']) if (ctx.eventTypes[key]) await ctx.eventSource.emit(ctx.eventTypes[key], index);
+      } finally { this._internalUpdate = false; }
+      const lastAnalysis = run.requests.findLast(r => r.label.includes('analysis'));
+      this.status(lastAnalysis?.status === 'error' ? '回复已保存；本轮记忆整理失败，原文保留' : '本轮已完成并保存', lastAnalysis?.status === 'error');
+    } catch (error) {
+      const stopped = run.controller.signal.aborted || !run.isCurrent();
+      if (!run.writer && run.isCurrent()) await this._removeTemporary(pending, target);
+      if (run.writer && run.isCurrent()) {
+        this._syncSwipe(target);
+        if (!run.saveAttempted) try { await this._save({ ...run, assertActive: () => {} }); } catch { /* status below remains explicit */ }
       }
-      this._savedUserInput = null;
-      console.log("[NarrativeAgent] Pipeline start, userInput preview:", userInput?.substring(0, 60), "isRegeneration:", isRegeneration);
-
-      const lastMsgIndex = chat.length - 1;
-      this.orchestrator.onProgress((status) => {
-        const msg = chat[lastMsgIndex];
-        if (msg && !msg.is_user) {
-          msg.mes = status;
-          applySummaryDisplay(msg);
-          try { ctx.updateMessageBlock(lastMsgIndex, msg); } catch (e) { /* ignore */ }
-        }
-      });
-
-      const result = await this.orchestrator.pipeline(userInput, isRegeneration, chat);
-
-      if (lastMsg && !lastMsg.is_user) {
-        lastMsg.mes = result.finalOutput || result.narrative;
-        lastMsg.extra = lastMsg.extra || {};
-        lastMsg.extra.state_panel = null;
-        lastMsg.extra.writing_guide = result.writingGuide;
-        lastMsg.extra.events = result.events;
-        applySummaryDisplay(lastMsg);
-        ctx.updateMessageBlock(chat.length - 1, lastMsg);
-      }
-
-      if (typeof ctx.saveChat === "function") await ctx.saveChat();
-      console.log("[NarrativeAgent] Pipeline 执行完成, 输出长度:", result.finalOutput.length);
-
-      await this.orchestrator.prefetchState();
-
-      ctx.eventSource.emit(ctx.eventTypes.MESSAGE_EDITED, chat.length - 1);
-      ctx.eventSource.emit(ctx.eventTypes.MESSAGE_UPDATED, chat.length - 1);
-      ctx.eventSource.emit(ctx.eventTypes.CHARACTER_MESSAGE_RENDERED, chat.length - 1);
-
-      for (const cb of this._pipelineCompleteCbs) {
-        try { await cb(result); } catch (err) { console.error("[NarrativeAgent] Callback error:", err); }
-      }
-    } catch (err) {
-      console.error("[NarrativeAgent] Pipeline 执行失败:", err);
-      if (lastMsg) {
-        if (isApiFailure(err)) {
-          lastMsg.mes = "API请求失败或被打断，工作流终止！";
-        } else {
-          lastMsg.mes = "工作流执行异常，请检查控制台日志。";
-        }
-        applySummaryDisplay(lastMsg);
-        ctx.updateMessageBlock(chat.length - 1, lastMsg);
-      }
-      try { ctx.eventSource.emit(ctx.eventTypes.MESSAGE_EDITED, chat.length - 1); } catch {}
-      try { ctx.eventSource.emit(ctx.eventTypes.MESSAGE_UPDATED, chat.length - 1); } catch {}
+      this.status(stopped ? `${run.cancelReason || '已停止'}${run.writer ? '；已收到的回复保留' : ''}` : `${error.message}；${run.writer ? '回复已保留' : '请检查接口后重试'}`, !stopped);
+      console.error('[Save]', error);
     } finally {
-      // 恢复 UI 到正常状态
-      ctx.eventSource.removeListener(ctx.eventTypes.GENERATION_STOPPED, this._stopEventHandler);
-      this._stopEventHandler = null;
-      $('#send_but').prop('disabled', false).css('pointer-events', '');
-      $('#option_regenerate, #option_continue, #mes_continue, #mes_impersonate')
-        .prop('disabled', false).css('pointer-events', '');
-      $('#mes_stop').css('display', 'none');
-      delete document.body.dataset.generating;
+      endGenerationSession(run);
+      this.lastRun = { status: this.lastStatus, requests: run.requests, promptAudit: run.promptAudit, saveResult: run.saveResult };
+      this._run = null;
+      this.orchestrator.onProgress(null);
+      this.orchestrator._shouldCancel = false;
+      this.orchestrator._isRunning = false;
       this.isPipelineRunning = false;
+      this._showReply();
+      this._unlock();
+      resolveIdle();
     }
   }
 }

@@ -1,54 +1,512 @@
---- a/bridge.js
-+++ b/bridge.js
-@@ -1,5 +1,6 @@
- import { getSTContext, extractPresetContext, getLatestUserInput, isApiFailure } from "./utils.js";
- import { PLACEHOLDER } from "./constants.js";
-+import { applySummaryDisplay, noteRelayRequest } from "./save-custom.js";
+--- a/agent-writing.js
++++ b/agent-writing.js
+@@ -1,7 +1,9 @@
+ import { callLLM } from "./llm.js";
+ import { WRITING_SYSTEM_SUFFIX, MERGED_WRITING_SYSTEM_SUFFIX } from "./constants.js";
++import { hasNativeWriter, buildNativeWritingMessages } from './native-chat.js';
  
- export class SillyTavernBridge {
-   constructor(orchestrator) {
-@@ -100,6 +101,7 @@
-     data.chat.push({ role: "system", content: "You are a relay. You must output exactly the following text and nothing else: " + PLACEHOLDER });
-     data.chat.push({ role: "user", content: "Relay the designated text now." });
-     this.wasIntercepted = true;
-+    if (!data.dryRun) noteRelayRequest();
-   }
+ export async function runWritingAgent(ctx) {
++  if (hasNativeWriter()) return (await callLLM(buildNativeWritingMessages(ctx), { label: 'writing' })).trim();
+   const guide = ctx.writingGuide;
+   const hasToolResults = ctx.toolResultsText && ctx.toolResultsText.length > 0;
  
-   async _onGenerationEnded() {
-@@ -146,6 +148,7 @@
-         const msg = chat[lastMsgIndex];
-         if (msg && !msg.is_user) {
-           msg.mes = status;
-+          applySummaryDisplay(msg);
-           try { ctx.updateMessageBlock(lastMsgIndex, msg); } catch (e) { /* ignore */ }
-         }
-       });
-@@ -158,6 +161,7 @@
-         lastMsg.extra.state_panel = null;
-         lastMsg.extra.writing_guide = result.writingGuide;
-         lastMsg.extra.events = result.events;
-+        applySummaryDisplay(lastMsg);
-         ctx.updateMessageBlock(chat.length - 1, lastMsg);
-       }
+@@ -84,6 +86,7 @@
+ }
  
-@@ -181,6 +185,7 @@
-         } else {
-           lastMsg.mes = "工作流执行异常，请检查控制台日志。";
-         }
-+        applySummaryDisplay(lastMsg);
-         ctx.updateMessageBlock(chat.length - 1, lastMsg);
-       }
-       try { ctx.eventSource.emit(ctx.eventTypes.MESSAGE_EDITED, chat.length - 1); } catch {}
-@@ -197,4 +202,4 @@
-       this.isPipelineRunning = false;
-     }
-   }
+ export async function runMergedWritingAgent(ctx) {
++  if (hasNativeWriter()) return (await callLLM(buildNativeWritingMessages(ctx), { label: 'merged-writing' })).trim();
+   let systemContent = "";
+ 
+   if (ctx.presetContext) {
+@@ -148,4 +151,4 @@
+ 
+   const raw = await callLLM(messages, { label: "merged-writing" });
+   return raw.trim();
 -}
 \ No newline at end of file
 +}
+--- a/bridge.js
++++ b/bridge.js
+@@ -1,5 +1,12 @@
+-import { getSTContext, extractPresetContext, getLatestUserInput, isApiFailure } from "./utils.js";
+-import { PLACEHOLDER } from "./constants.js";
++import { getSTContext, extractPresetContext, getLatestUserInput, getConversationId } from './utils.js';
++import { PLACEHOLDER } from './constants.js';
++import { applySummaryDisplay, noteRelayRequest } from './save-custom.js';
++import { takeNativePromptSnapshot } from './native-chat.js';
++import { startGenerationSession, endGenerationSession } from './generation-session.js';
++import { replaceWriterMetadata } from './response-adapter.js';
++
++const copy = value => JSON.parse(JSON.stringify(value));
++const envelope = body => `<context>\n${body}\n</context>`;
+ 
+ export class SillyTavernBridge {
+   constructor(orchestrator) {
+@@ -8,193 +15,288 @@
+     this.wasIntercepted = false;
+     this.isPipelineRunning = false;
+     this._aborted = false;
+-    this._generationType = null;
+-    this._savedUserInput = null;
+-    this._generationCompleted = true;
+     this._pipelineCompleteCbs = [];
+-    this._stopEventHandler = null;
+-    this._boundOnPromptReady = this._onPromptReady.bind(this);
+-    this._boundOnGenerationEnded = this._onGenerationEnded.bind(this);
+-    this._boundOnGenerationStarted = this._onGenerationStarted.bind(this);
+-    this._boundOnMessageDeleted = this._onMessageDeleted.bind(this);
++    this._listeners = [];
++    this._pending = null;
++    this._run = null;
++    this._settled = Promise.resolve();
+   }
+ 
+   onPipelineComplete(cb) { this._pipelineCompleteCbs.push(cb); }
+-
+   install() {
+     const ctx = getSTContext();
+-    if (!ctx) { console.error("[NarrativeAgent] ST context not available"); return; }
+-    ctx.eventSource.on(ctx.eventTypes.CHAT_COMPLETION_PROMPT_READY, this._boundOnPromptReady);
+-    ctx.eventSource.on(ctx.eventTypes.GENERATION_ENDED, this._boundOnGenerationEnded);
+-    ctx.eventSource.on(ctx.eventTypes.GENERATION_STARTED, this._boundOnGenerationStarted);
+-    ctx.eventSource.on(ctx.eventTypes.MESSAGE_DELETED, this._boundOnMessageDeleted);
+-    console.log("[NarrativeAgent] Bridge installed, enabled:", this.enabled);
+-  }
+-
++    const on = (key, handler) => {
++      if (!ctx.eventTypes[key]) return;
++      const bound = handler.bind(this);
++      ctx.eventSource.on(ctx.eventTypes[key], bound);
++      this._listeners.push([ctx.eventTypes[key], bound]);
++    };
++    on('GENERATION_STARTED', this._onGenerationStarted);
++    on('CHAT_COMPLETION_PROMPT_READY', this._onPromptReady);
++    on('GENERATION_ENDED', this._onGenerationEnded);
++    on('GENERATION_STOPPED', function () {
++      if (!this.enabled && !this.isPipelineRunning && !this.wasIntercepted) return;
++      this.cancel('已停止');
++      this.status('已停止');
++    });
++    on('CHAT_CHANGED', function () { this.cancel('已切换聊天'); });
++    on('MESSAGE_DELETED', function (length) {
++      if (this.isPipelineRunning) { this.cancel('消息已删除'); return; }
++      if (this.enabled && length <= 1) this.orchestrator.rollbackToTurn(0);
++      else this.orchestrator.invalidatePrefetch();
++    });
++    on('MESSAGE_EDITED', function (index) {
++      if (!this._internalUpdate && this._run?.target === getSTContext()?.chat?.[Number(index)]) this.cancel('回复已被编辑');
++    });
++  }
+   uninstall() {
+-    const ctx = getSTContext();
+-    if (!ctx) return;
+-    ctx.eventSource.removeListener(ctx.eventTypes.CHAT_COMPLETION_PROMPT_READY, this._boundOnPromptReady);
+-    ctx.eventSource.removeListener(ctx.eventTypes.GENERATION_ENDED, this._boundOnGenerationEnded);
+-    ctx.eventSource.removeListener(ctx.eventTypes.GENERATION_STARTED, this._boundOnGenerationStarted);
+-    ctx.eventSource.removeListener(ctx.eventTypes.MESSAGE_DELETED, this._boundOnMessageDeleted);
+-  }
+-
+-  _onGenerationStarted(type) {
+-    this._generationType = type;
+-    this._generationCompleted = false;
+-    console.log("[NarrativeAgent] GENERATION_STARTED, type:", type);
+-  }
+-
+-  _onMessageDeleted(newChatLength) {
+-    if (!this.enabled || this.isPipelineRunning) return;
+-
+-    if (newChatLength <= 1) {
+-      console.log("[NarrativeAgent] MESSAGE_DELETED, chat near-empty, full reset. newChatLength:", newChatLength);
+-      this.orchestrator.rollbackToTurn(0);
++    this.cancel('插件已关闭');
++    const ctx = getSTContext();
++    for (const [event, fn] of this._listeners) ctx?.eventSource.removeListener(event, fn);
++    this._listeners = [];
++  }
++
++  status(text, error = false) {
++    const el = typeof document === 'undefined' ? null : document.querySelector('#save_run_status');
++    if (el) el.textContent = text;
++    this.lastStatus = text;
++    if (error && typeof toastr !== 'undefined') toastr.warning(text, 'Save');
++  }
++
++  _hideRelay(index) {
++    if (typeof document === 'undefined') return;
++    let style = document.querySelector('#save_pending_message');
++    if (!style) {
++      style = document.createElement('style'); style.id = 'save_pending_message';
++      document.head.append(style);
++    }
++    style.textContent = `#chat .mes[mesid="${index}"] { display: none !important; }`;
++  }
++  _showReply() { document.querySelector?.('#save_pending_message')?.remove(); }
++
++  _lock() {
++    getSTContext()?.deactivateSendButtons?.();
++    $('#send_but, #option_regenerate, #option_continue, #mes_continue, #mes_impersonate').prop('disabled', true).css('pointer-events', 'none');
++    $('#mes_stop').css('display', 'flex');
++  }
++  _unlock() {
++    $('#send_but, #option_regenerate, #option_continue, #mes_continue, #mes_impersonate').prop('disabled', false).css('pointer-events', '');
++    getSTContext()?.activateSendButtons?.();
++    $('#mes_stop').css('display', 'none');
++    delete document.body.dataset.generating;
++  }
++
++  _onGenerationStarted(type, _options, dryRun) {
++    type = type || 'normal';
++    if (!this.enabled || dryRun || !['normal', 'regenerate', 'swipe', 'continue'].includes(type)) return;
++    if (this.isPipelineRunning) throw new Error('Save 上一轮仍在处理，请先停止');
++    const ctx = getSTContext();
++    const last = ctx.chat.at(-1);
++    this._aborted = false;
++    this._pending = {
++      type, chat: ctx.chat, chatId: getConversationId(),
++      prior: type !== 'normal' && last && !last.is_user ? copy(last) : null,
++      priorIndex: ctx.chat.length - 1,
++    };
++  }
++
++  _onPromptReady(data) {
++    if (!this.enabled || this.isPipelineRunning || !this._pending || !Array.isArray(data.chat)) return;
++    const ctx = getSTContext();
++    if (this._pending.chat !== ctx.chat) return;
++    const snapshot = takeNativePromptSnapshot(ctx);
++    if (!data.dryRun && !snapshot) {
++      this.status('原生提示未能读取，本轮使用酒馆原生生成；请检查扩展兼容性', true);
++      this._pending = null;
+       return;
+     }
+-
+-    console.log("[NarrativeAgent] MESSAGE_DELETED, newChatLength:", newChatLength,
+-      "turnCounter:", this.orchestrator.turnCounter, "— relay模式下聊天结构已变更，部分删除不触发回退");
+-    this.orchestrator.invalidatePrefetch();
+-  }
+-
+-  _onPromptReady(data) {
+-    if (!this.enabled || this.isPipelineRunning) return;
+-    this._aborted = false;
+-    console.log("[NarrativeAgent] 拦截 CHAT_COMPLETION_PROMPT_READY, 原始消息数:", data.chat?.length);
+-
+-    if (data.chat && data.chat.length > 0) {
+-      const sample = data.chat[0];
+-      console.log("[NA:bridge] data.chat[0] keys:", Object.keys(sample), "hasMes:", "mes" in sample, "hasContent:", "content" in sample, "hasIs_user:", "is_user" in sample, "hasRole:", "role" in sample);
+-      console.log("[NA:bridge] data.chat[0] role:", sample.role, "is_user:", sample.is_user, "mes首80字:", sample.mes?.substring(0, 80), "content首80字:", sample.content?.substring(0, 80));
+-    }
+-
+-    this.orchestrator.worldInfoResolver.buildFormattingSet().catch(e => console.warn("[NA] buildFormattingSet in _onPromptReady failed:", e.message));
+-
+-    const ctx = getSTContext();
+-    const rawChat = ctx?.chat || [];
+-    console.log("[NA:bridge] ctx.chat (前端展示消息) 长度:", rawChat.length);
+-    if (rawChat.length > 0) {
+-      const rawSample = rawChat[0];
+-      console.log("[NA:bridge] ctx.chat[0] keys:", Object.keys(rawSample), "is_user:", rawSample.is_user, "mes长度:", rawSample.mes?.length);
+-    }
+-
+-    this._savedUserInput = getLatestUserInput(rawChat);
+-    console.log("[NarrativeAgent] 已保存用户输入:", this._savedUserInput?.substring(0, 80), "长度:", this._savedUserInput?.length);
+-
+-    const { turns } = this.orchestrator._extractTurnHistoryFromChat(rawChat);
+-    this.orchestrator.applyChatExtractedContext(turns);
+-    console.log("[NarrativeAgent] 从chat提取轮次:", turns.length);
+-
+-    if (this.orchestrator.config.presetMode === "split") {
+-      const presetCtx = extractPresetContext();
+-      this.orchestrator.setPresetContext(presetCtx);
+-      console.log("[NarrativeAgent] 预设上下文已提取, planningContext长度:", presetCtx.planningContext.length, "writingSystemContext长度:", presetCtx.writingSystemContext.length, "writingUserContext长度:", presetCtx.writingUserContext.length);
+-    } else {
+-      this.orchestrator.setPresetContext(null);
+-    }
+-
+-    data.chat.splice(0, data.chat.length);
+-    data.chat.push({ role: "system", content: "You are a relay. You must output exactly the following text and nothing else: " + PLACEHOLDER });
+-    data.chat.push({ role: "user", content: "Relay the designated text now." });
+-    this.wasIntercepted = true;
++    if (!data.dryRun) {
++      const raw = ctx.chat;
++      const { turns } = this.orchestrator._extractTurnHistoryFromChat(raw);
++      this.orchestrator.applyChatExtractedContext(turns);
++      this.orchestrator.setPresetContext(this.orchestrator.config.presetMode === 'split' ? extractPresetContext() : null);
++      const last = raw.at(-1);
++      Object.assign(this._pending, {
++        snapshot, turns, userInput: getLatestUserInput(raw),
++        targetIndex: this._pending.type !== 'normal' && last && !last.is_user ? raw.length - 1 : raw.length,
++      });
++      this._hideRelay(this._pending.targetIndex);
++      this.wasIntercepted = true;
++      noteRelayRequest();
++      this.status('正在生成回复');
++    }
++    data.chat.splice(0, data.chat.length,
++      { role: 'system', content: 'You are a relay. You must output exactly the following text and nothing else: ' + PLACEHOLDER },
++      { role: 'user', content: 'Relay the designated text now.' });
++  }
++
++  cancel(reason = '已停止') {
++    this._aborted = true;
++    this.orchestrator._shouldCancel = true;
++    this._run?.cancel(reason);
++    if (!this.isPipelineRunning && this._pending) {
++      this.wasIntercepted = false;
++      this._pending.cancelReason = reason;
++    }
++  }
++  async waitForIdle() { await this._settled; }
++
++  _syncSwipe(message) {
++    if (!Array.isArray(message.swipes)) return;
++    const index = message.swipe_id ?? 0;
++    message.swipes[index] = message.mes;
++    if (Array.isArray(message.swipe_info)) message.swipe_info[index] = {
++      ...(message.swipe_info[index] || {}), send_date: message.send_date,
++      gen_started: message.gen_started, gen_finished: message.gen_finished, extra: copy(message.extra || {}),
++    };
++  }
++
++  _render(run) {
++    run.assertActive();
++    const index = run.chat.indexOf(run.target);
++    applySummaryDisplay(run.target);
++    this._syncSwipe(run.target);
++    run.revision = run.target.mes;
++    run.context.updateMessageBlock(index, run.target);
++    run.context.updateReasoningUI?.(index);
++    this._showReply();
++  }
++
++  async _save(run) {
++    run.assertActive();
++    if (typeof run.context.saveChat !== 'function') throw new Error('当前酒馆没有提供保存接口');
++    run.saveAttempted = true;
++    let timer;
++    const originalFetch = globalThis.fetch;
++    const outcomes = [];
++    // ST catches save errors internally. Observe its actual HTTP result without
++    // changing requests, consuming responses, or writing through another API.
++    const observedFetch = async (...args) => {
++      const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || String(args[0]);
++      const isSave = /\/api\/(?:chats\/(?:group\/)?save|groupchats\/save)(?:[?#]|$)/.test(url);
++      try {
++        const result = await originalFetch.apply(globalThis, args);
++        if (isSave) outcomes.push({ ok: result.ok, status: result.status });
++        return result;
++      } catch (error) {
++        if (isSave) outcomes.push({ ok: false, status: 'network' });
++        throw error;
++      }
++    };
++    globalThis.fetch = observedFetch;
++    try {
++      await Promise.race([
++        run.context.saveChat(),
++        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('保存未确认，请保留页面并重试保存')), run.saveTimeout ?? 15000); }),
++      ]);
++      const saved = outcomes.at(-1);
++      run.saveResult = saved ?? { ok: false, status: 'unconfirmed' };
++      if (!saved?.ok) throw new Error(saved ? `保存失败（${saved.status}），请保留页面并重试保存` : '保存结果未确认，请保留页面并重试保存');
++    } finally {
++      clearTimeout(timer);
++      if (globalThis.fetch === observedFetch) globalThis.fetch = originalFetch;
++    }
++  }
++
++  async _removeTemporary(pending, target) {
++    const ctx = getSTContext();
++    if (ctx?.chat !== pending.chat || getConversationId() !== pending.chatId || !target || target.is_user) return;
++    const index = ctx.chat.indexOf(target);
++    if (index < 0) return;
++    if (pending.prior) {
++      Object.keys(target).forEach(key => delete target[key]);
++      Object.assign(target, copy(pending.prior));
++      ctx.updateMessageBlock(index, target);
++      ctx.updateReasoningUI?.(index);
++    } else if (index === ctx.chat.length - 1) {
++      if (ctx.deleteLastMessage) await ctx.deleteLastMessage();
++      else ctx.chat.pop();
++    }
+   }
+ 
+   async _onGenerationEnded() {
+-    this._generationCompleted = true;
+-
+-    if (!this.enabled || this.isPipelineRunning || !this.wasIntercepted || this._aborted) return;
++    if (this.isPipelineRunning || !this._pending) return;
++    const pending = this._pending;
++    this._pending = null;
++    const ctx = getSTContext();
++    const target = pending.chat[pending.targetIndex];
++    if (!this.wasIntercepted || this._aborted || !target?.mes?.includes(PLACEHOLDER) || ctx.chat !== pending.chat) {
++      if (this.wasIntercepted || pending.cancelReason) await this._removeTemporary(pending, target);
++      this.wasIntercepted = false;
++      this._showReply();
++      if (pending.cancelReason) this.status(pending.cancelReason);
++      return;
++    }
+     this.wasIntercepted = false;
+-
+-    const ctx = getSTContext();
+-    if (!ctx) return;
+-
+-    const lastMsg = ctx.chat[ctx.chat.length - 1];
+-    if (!lastMsg || lastMsg.is_user || !(lastMsg.mes || "").includes(PLACEHOLDER)) {
+-      console.warn("[NarrativeAgent] 中继未正常完成（可能被用户取消或API错误），跳过Pipeline");
+-      return;
+-    }
+-
+     this.isPipelineRunning = true;
+-
+-    // 切换 UI 到"生成中"状态：显示停止按钮，禁用发送路径
+-    $('#send_but').prop('disabled', true).css('pointer-events', 'none');
+-    $('#option_regenerate, #option_continue, #mes_continue, #mes_impersonate')
+-      .prop('disabled', true).css('pointer-events', 'none');
+-    $('#mes_stop').css('display', 'flex');
+-    document.body.dataset.generating = 'true';
+-    this._stopEventHandler = () => { this.orchestrator._shouldCancel = true; };
+-    ctx.eventSource.on(ctx.eventTypes.GENERATION_STOPPED, this._stopEventHandler);
+-
+-    const chat = ctx.chat;
+-    const isRegeneration = this._generationType === "swipe" || this._generationType === "regenerate";
+-    this._generationType = null;
+-
++    this.orchestrator._shouldCancel = false;
++    this._lock();
++    for (const key of ['reasoning', 'reasoning_display_text', 'reasoning_duration', 'reasoning_signature', 'token_count', 'time_to_first_token']) delete (target.extra || {})[key];
++    let resolveIdle;
++    this._settled = new Promise(resolve => { resolveIdle = resolve; });
++    const run = startGenerationSession({
++      context: ctx, chat: pending.chat, chatId: pending.chatId, target,
++      snapshot: pending.snapshot, turns: pending.turns, orchestrator: this.orchestrator,
++      revision: target.mes,
++      isCurrent: () => getSTContext()?.chat === pending.chat && getConversationId() === pending.chatId && pending.chat.includes(target) && (!this._run || target.mes === this._run.revision),
++      onStatus: text => this.status(text),
++      onWriter: response => {
++        run.assertActive();
++        let text = response.text.trim();
++        if (pending.type === 'continue' && pending.prior) text = (pending.prior.extra?.display_text ?? pending.prior.mes) + text;
++        run.body = text;
++        target.mes = envelope(text);
++        run.revision = target.mes;
++        replaceWriterMetadata(target, response, ctx);
++        target.extra.save_native_writer = 1;
++        this._render(run);
++        return text;
++      },
++    });
++    this._run = run;
++    this.orchestrator.onProgress(() => {});
+     try {
+-      let userInput = getLatestUserInput(chat);
+-      if (!userInput && this._savedUserInput) {
+-        userInput = this._savedUserInput;
+-        console.log("[NarrativeAgent] 使用保存的用户输入:", userInput?.substring(0, 80));
++      const result = await this.orchestrator.pipeline(pending.userInput, ['swipe', 'regenerate', 'continue'].includes(pending.type), pending.chat);
++      run.assertActive();
++      if (!run.writer || !run.body) throw new Error('本轮未收到实际回复');
++      target.mes = pending.type === 'continue'
++        ? (result.finalOutput || envelope(run.body)).replace(envelope(result.narrative), envelope(run.body))
++        : result.finalOutput || envelope(run.body);
++      run.revision = target.mes;
++      target.extra.state_panel = null;
++      target.extra.writing_guide = result.writingGuide;
++      target.extra.events = result.events;
++      this._render(run);
++      for (const cb of this._pipelineCompleteCbs) { run.assertActive(); await cb(result); }
++      await this._save(run);
++      run.assertActive();
++      this._internalUpdate = true;
++      try {
++        const index = run.chat.indexOf(target);
++        for (const key of ['MESSAGE_EDITED', 'MESSAGE_UPDATED', 'CHARACTER_MESSAGE_RENDERED']) if (ctx.eventTypes[key]) await ctx.eventSource.emit(ctx.eventTypes[key], index);
++      } finally { this._internalUpdate = false; }
++      const lastAnalysis = run.requests.findLast(r => r.label.includes('analysis'));
++      this.status(lastAnalysis?.status === 'error' ? '回复已保存；本轮记忆整理失败，原文保留' : '本轮已完成并保存', lastAnalysis?.status === 'error');
++    } catch (error) {
++      const stopped = run.controller.signal.aborted || !run.isCurrent();
++      if (!run.writer && run.isCurrent()) await this._removeTemporary(pending, target);
++      if (run.writer && run.isCurrent()) {
++        this._syncSwipe(target);
++        if (!run.saveAttempted) try { await this._save({ ...run, assertActive: () => {} }); } catch { /* status below remains explicit */ }
+       }
+-      this._savedUserInput = null;
+-      console.log("[NarrativeAgent] Pipeline start, userInput preview:", userInput?.substring(0, 60), "isRegeneration:", isRegeneration);
+-
+-      const lastMsgIndex = chat.length - 1;
+-      this.orchestrator.onProgress((status) => {
+-        const msg = chat[lastMsgIndex];
+-        if (msg && !msg.is_user) {
+-          msg.mes = status;
+-          try { ctx.updateMessageBlock(lastMsgIndex, msg); } catch (e) { /* ignore */ }
+-        }
+-      });
+-
+-      const result = await this.orchestrator.pipeline(userInput, isRegeneration, chat);
+-
+-      if (lastMsg && !lastMsg.is_user) {
+-        lastMsg.mes = result.finalOutput || result.narrative;
+-        lastMsg.extra = lastMsg.extra || {};
+-        lastMsg.extra.state_panel = null;
+-        lastMsg.extra.writing_guide = result.writingGuide;
+-        lastMsg.extra.events = result.events;
+-        ctx.updateMessageBlock(chat.length - 1, lastMsg);
+-      }
+-
+-      if (typeof ctx.saveChat === "function") await ctx.saveChat();
+-      console.log("[NarrativeAgent] Pipeline 执行完成, 输出长度:", result.finalOutput.length);
+-
+-      await this.orchestrator.prefetchState();
+-
+-      ctx.eventSource.emit(ctx.eventTypes.MESSAGE_EDITED, chat.length - 1);
+-      ctx.eventSource.emit(ctx.eventTypes.MESSAGE_UPDATED, chat.length - 1);
+-      ctx.eventSource.emit(ctx.eventTypes.CHARACTER_MESSAGE_RENDERED, chat.length - 1);
+-
+-      for (const cb of this._pipelineCompleteCbs) {
+-        try { await cb(result); } catch (err) { console.error("[NarrativeAgent] Callback error:", err); }
+-      }
+-    } catch (err) {
+-      console.error("[NarrativeAgent] Pipeline 执行失败:", err);
+-      if (lastMsg) {
+-        if (isApiFailure(err)) {
+-          lastMsg.mes = "API请求失败或被打断，工作流终止！";
+-        } else {
+-          lastMsg.mes = "工作流执行异常，请检查控制台日志。";
+-        }
+-        ctx.updateMessageBlock(chat.length - 1, lastMsg);
+-      }
+-      try { ctx.eventSource.emit(ctx.eventTypes.MESSAGE_EDITED, chat.length - 1); } catch {}
+-      try { ctx.eventSource.emit(ctx.eventTypes.MESSAGE_UPDATED, chat.length - 1); } catch {}
++      this.status(stopped ? `${run.cancelReason || '已停止'}${run.writer ? '；已收到的回复保留' : ''}` : `${error.message}；${run.writer ? '回复已保留' : '请检查接口后重试'}`, !stopped);
++      console.error('[Save]', error);
+     } finally {
+-      // 恢复 UI 到正常状态
+-      ctx.eventSource.removeListener(ctx.eventTypes.GENERATION_STOPPED, this._stopEventHandler);
+-      this._stopEventHandler = null;
+-      $('#send_but').prop('disabled', false).css('pointer-events', '');
+-      $('#option_regenerate, #option_continue, #mes_continue, #mes_impersonate')
+-        .prop('disabled', false).css('pointer-events', '');
+-      $('#mes_stop').css('display', 'none');
+-      delete document.body.dataset.generating;
++      endGenerationSession(run);
++      this.lastRun = { status: this.lastStatus, requests: run.requests, promptAudit: run.promptAudit, saveResult: run.saveResult };
++      this._run = null;
++      this.orchestrator.onProgress(null);
++      this.orchestrator._shouldCancel = false;
++      this.orchestrator._isRunning = false;
+       this.isPipelineRunning = false;
+-    }
+-  }
+-}
+\ No newline at end of file
++      this._showReply();
++      this._unlock();
++      resolveIdle();
++    }
++  }
++}
 --- a/index.js
 +++ b/index.js
-@@ -2,10 +2,11 @@
+@@ -2,11 +2,13 @@
  import { StateManager, SummaryStore } from "./state.js";
  import { FileManager } from "./store.js";
  import { CharacterReader, UserPersonaReader } from "./readers.js";
@@ -60,9 +518,11 @@
 +import { loadOrCreateState, loadOrCreateSummary, persistState } from "./settings.js";
 +import { loadConfig, saveConfig } from "./settings-custom.js";
  import { getSTContext, getConversationId, deepMerge } from "./utils.js";
++import { installNativePromptCapture } from './native-chat.js';
  
  let orchestrator = null;
-@@ -16,6 +17,7 @@
+ let bridge = null;
+@@ -16,6 +18,7 @@
  async function initExtension() {
    console.log("[NarrativeAgent] Initializing...");
    config = loadConfig();
@@ -70,7 +530,57 @@
  
    currentChatId = getConversationId();
    const stateManager = loadOrCreateState(currentChatId);
-@@ -111,9 +113,7 @@
+@@ -31,6 +34,15 @@
+ 
+   bridge = new SillyTavernBridge(orchestrator);
+   bridge.enabled = config.enabled;
++  let compatibilityError = null;
++  try {
++    await installNativePromptCapture(() => bridge.enabled, () => bridge.isPipelineRunning);
++  } catch (error) {
++    compatibilityError = error;
++    config.enabled = false;
++    bridge.enabled = false;
++    console.error('[Save] Native prompt adapter unavailable:', error);
++  }
+   bridge.onPipelineComplete(() => { persistState(orchestrator, config, currentChatId); refreshStateDisplay(); });
+   if (config.enabled) await worldInfoResolver.buildFormattingSet();
+   bridge.install();
+@@ -40,6 +52,7 @@
+   installChatDeleteHandler();
+ 
+   await registerSettingsPane();
++  if (compatibilityError) bridge.status('当前酒馆的原生提示接口不可用，已保留原生生成；请检查酒馆版本', true);
+   console.log("[NarrativeAgent] Initialization complete, enabled:", config.enabled);
+ }
+ 
+@@ -57,23 +70,8 @@
+       return;
+     }
+ 
+-    bridge._aborted = true;
+-
+-    if (orchestrator._isRunning) {
+-      console.log("[NarrativeAgent] Chat changed, 正在终止运行中的pipeline...");
+-      orchestrator._shouldCancel = true;
+-      const startTime = Date.now();
+-      while (orchestrator._isRunning && Date.now() - startTime < 30000) {
+-        await new Promise(r => setTimeout(r, 100));
+-      }
+-      if (orchestrator._isRunning) {
+-        console.warn("[NarrativeAgent] Pipeline终止超时，强制继续切换");
+-        orchestrator._isRunning = false;
+-        orchestrator._shouldCancel = true;
+-      } else {
+-        console.log("[NarrativeAgent] Pipeline已终止");
+-      }
+-    }
++    bridge.cancel('已切换聊天');
++    await bridge.waitForIdle();
+ 
+     console.log("[NarrativeAgent] Chat changed, saving current state for:", currentChatId);
+     persistState(orchestrator, config, currentChatId);
+@@ -111,9 +109,7 @@
  async function registerSettingsPane() {
    try {
      const ctx = getSTContext();
@@ -81,16 +591,30 @@
      const $html = $(html);
  
      $html.find("#na_enabled").prop("checked", config.enabled);
-@@ -249,7 +249,7 @@
+@@ -121,6 +117,7 @@
+       const newEnabled = $(this).prop("checked");
+ 
+       if (config.enabled && !newEnabled) {
++        bridge?.cancel('插件已关闭');
+         persistState(orchestrator, config, currentChatId);
+       }
+ 
+@@ -249,7 +246,13 @@
      });
  
      $html.find("#na_open_tutorial").on("click", function () {
 -      window.open("/scripts/extensions/third-party/narrative-agent/TUTORIAL.html", "_blank");
 +      window.open(new URL('./TUTORIAL.html', import.meta.url).href, "_blank");
++    });
++
++    $html.find('#save_export_run').on('click', function () {
++      const blob = new Blob([JSON.stringify(bridge?.lastRun ?? { status: bridge?.lastStatus || '尚无执行记录' }, null, 2)], { type: 'application/json' });
++      const url = URL.createObjectURL(blob);
++      const a = document.createElement('a'); a.href = url; a.download = 'save-run-log.json'; a.click(); URL.revokeObjectURL(url);
      });
  
      $("#extensions_settings").append($html);
-@@ -258,6 +258,8 @@
+@@ -258,6 +261,8 @@
  }
  
  function refreshStateDisplay($html) {
@@ -99,39 +623,130 @@
    const $display = $html ? $html.find("#na_state_display") : $("#na_state_display");
    if ($display.length && orchestrator) {
      const summary = orchestrator.stateManager.getSummary();
-@@ -280,4 +282,4 @@
+@@ -280,4 +285,4 @@
        if (typeof $ !== "undefined") { clearInterval(interval); $(bootstrap); }
      }, 100);
    }
 -})();
 \ No newline at end of file
 +})();
+--- a/llm.js
++++ b/llm.js
+@@ -1,4 +1,6 @@
+ import { getSTContext } from "./utils.js";
++import { awaitRequest, getGenerationSession, publishWriter } from './generation-session.js';
++import { getWriterResponse } from './response-adapter.js';
+ 
+ let llmCallCount = 0;
+ 
+@@ -14,15 +16,20 @@
+       console.log(`[LLMClient] ${label} \u8c03\u7528, messages \u6570\u91cf:`, messages.length);
+       const ctx = getSTContext();
+       if (!ctx) throw new Error("SillyTavern context not available");
+-      const result = await ctx.generateRaw({ prompt: messages });
+-      const text = extractText(result);
++      const isWriter = label === 'writing' || label === 'merged-writing';
++      const result = await awaitRequest(() => isWriter
++        ? getWriterResponse(messages)
++        : ctx.generateRaw({ prompt: messages }), label);
++      const text = isWriter ? result.text : extractText(result);
+       if (!text || (typeof text === "string" && text.trim().length === 0)) {
+         throw new Error("[LLMClient] generateRaw \u8fd4\u56de\u7a7a\u5185\u5bb9\uff0c\u8bf7\u6c42\u53ef\u80fd\u88ab\u53d6\u6d88\u6216API\u9519\u8bef");
+       }
+       console.log(`[LLMClient] ${label} \u8fd4\u56de, \u957f\u5ea6:`, text.length);
++      if (isWriter) return publishWriter(result) ?? text;
+       return text;
+     } catch (err) {
+       lastErr = err;
++      getGenerationSession()?.assertActive();
+       if (isAbortError(err)) throw new Error("Pipeline cancelled");
+       if (!isRetryable(err)) break;
+     }
+@@ -52,4 +59,4 @@
+   if (msg.includes("429") || msg.includes("rate")) return true;
+   if (/\b5\d{2}\b/.test(msg)) return true;
+   return false;
+-}
+\ No newline at end of file
++}
+--- a/orchestrator.js
++++ b/orchestrator.js
+@@ -4,6 +4,7 @@
+ import { runPlanningAgent } from "./agent-planning.js";
+ import { runWritingAgent, runMergedWritingAgent } from "./agent-writing.js";
+ import { runMergedAnalysisAgent } from "./agent-analysis.js";
++import { getGenerationSession } from './generation-session.js';
+ import { getMvuStateSummary } from "./mvu.js";
+ import { rollDice } from "./dice.js";
+ import { parseTextToVariables, isApiFailure } from "./utils.js";
+@@ -221,6 +222,7 @@
+     this._chat = chat;
+ 
+     let turnId;
++    try {
+     if (isRegeneration) {
+       turnId = `turn_${String(this.turnCounter).padStart(3, "0")}`;
+       await this._rollbackToCheckpoint(turnId);
+@@ -237,7 +239,6 @@
+       await this._analyzeTurn0();
+     }
+ 
+-    try {
+       const result = await this._fullPipeline(userInput, turnId);
+       if (!isRegeneration) this.turnCounter++;
+       this._mvuInitialized = true;
+@@ -251,6 +252,9 @@
+         await this._rollbackToCheckpoint(turnId);
+         return { narrative: "⚠️ 生成已中断", formatted: null, events: { applied: 0, rejected: 0 }, writingGuide: {}, finalOutput: "⚠️ 生成已中断", codeToolResults: [] };
+       }
++      // Never generate another body because summary/checkpoint persistence failed.
++      if (getGenerationSession()?.writer) throw error;
++      if (/PROHIBITED_CONTENT|SAFETY|CONTENT_FILTER|\b(?:401|403)\b/i.test(error.message || '')) throw error;
+       console.error("[NarrativeAgent] Pipeline error:", error);
+       if (isApiFailure(error)) {
+         this._reportProgress("API请求失败，尝试降级处理...");
+@@ -1285,4 +1289,4 @@
+     });
+     console.log("[NarrativeAgent] Switched to chat:", fileManager.basePath);
+   }
+-}
+\ No newline at end of file
++}
 --- a/manifest.json
 +++ b/manifest.json
-@@ -1,10 +1,10 @@
+@@ -1,11 +1,15 @@
  {
 -    "display_name": "Narrative Agent",
 -    "id": "narrative-agent",
-+    "display_name": "Save · 原版请求对齐版",
-+    "id": "save-original-minimal",
-     "api": 2,
+-    "api": 2,
 -    "version": "0.2.1",
 -    "description": "多Agent叙事系统v0.2.1：规划/工具执行/写作/合并分析",
 -    "author": "Lol1p0p",
-+    "version": "0.4.1",
-+    "description": "原版请求流程：隐藏末尾三项，不读世界书，不额外注入角色卡，独立启用开关。",
-+    "author": "Lol1p0p；按 Yu 的需求定制",
-     "tags": ["agent", "narrative", "pipeline"],
-     "js": "index.js",
-     "css": "style.css"
+-    "tags": ["agent", "narrative", "pipeline"],
+-    "js": "index.js",
+-    "css": "style.css"
++  "display_name": "Save",
++  "id": "save-original-minimal",
++  "api": 2,
++  "version": "0.5.0",
++  "description": "原版请求流程：隐藏末尾三项，不读世界书，不额外注入角色卡，独立启用开关。",
++  "author": "Lol1p0p；按 Yu 的需求定制",
++  "tags": [
++    "agent",
++    "narrative",
++    "pipeline"
++  ],
++  "js": "index.js",
++  "css": "style.css"
+ }
 --- a/settings.html
 +++ b/settings.html
-@@ -1,17 +1,18 @@
+@@ -1,21 +1,24 @@
  <div id="narrative_agent_settings">
      <div class="inline-drawer">
          <div class="inline-drawer-toggle inline-drawer-header">
 -            <b>Narrative Agent</b>
-+            <b>Save 0.4.1 · 原版请求对齐版</b>
++            <b>Save 0.5.0 · 原生聊天版</b>
              <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
          </div>
          <div class="inline-drawer-content">
@@ -140,14 +755,28 @@
  
              <label class="checkbox_label">
                  <input type="checkbox" id="na_enabled" name="na_enabled">
-                 <span>启用多Agent叙事系统</span>
+-                <span>启用多Agent叙事系统</span>
++                <span>启用省 Token 聊天</span>
              </label>
-             <small>启用后，消息发送将经过多Agent流水线（规划 → 工具执行 → 写作 → 合并分析）处理。</small>
+-            <small>启用后，消息发送将经过多Agent流水线（规划 → 工具执行 → 写作 → 合并分析）处理。</small>
++            <small>保留酒馆本轮的角色卡和已启用预设；旧历史使用原版窗口和摘要压缩。</small>
 +            <div><small id="save_original_takeover_status"></small></div>
++            <div><small id="save_run_status" role="status" aria-live="polite">等待发送</small></div>
++            <input type="button" class="menu_button" id="save_export_run" value="导出执行记录">
  
              <hr>
  
-@@ -28,16 +29,8 @@
+-            <h4>预设处理模式</h4>
++            <h4>后台规划预设</h4>
+             <div class="flex-container">
+                 <label>模式:</label>
+                 <select id="na_preset_mode" style="width: 200px;">
+@@ -24,20 +27,12 @@
+                     <option value="adapted" disabled>适配注入（开发中）</option>
+                 </select>
+             </div>
+-            <small>选择如何处理酒馆预设中的提示词。分割注入模式会将系统提示注入规划Agent、用户提示注入写作Agent。</small>
++            <small>此选项只影响原文召回的后台规划；实际回复始终使用酒馆本轮已启用的原生预设。</small>
  
              <hr>
  
@@ -162,11 +791,11 @@
 -            </div>
 -            <small>选择世界书条目的加载来源。卡包内嵌模式适用于已通过 narrative-agent-worldbook skill 规范化并嵌入卡包的世界书。</small>
 +            <h4>本次定制</h4>
-+            <small>不读取内嵌及外部世界书；角色信息、用户设定和预设的处理沿用原版，不额外注入角色卡全文。末尾三项只隐藏显示，后台摘要保留。</small>
++            <small>不注入世界书；正文使用酒馆已编译的角色卡、用户设定和预设，不额外增加文风或思考指令。隐藏末尾三项，后台摘要保留；进度只在此面板显示。</small>
  
              <hr>
  
-@@ -62,7 +55,6 @@
+@@ -62,7 +57,6 @@
              <div style="margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px;">
                  <input type="button" class="menu_button" id="na_reset_state" value="重置状态">
                  <input type="button" class="menu_button" id="na_refresh_state" value="刷新显示">
@@ -174,6 +803,1230 @@
                  <input type="button" class="menu_button" id="na_export_data" value="导出数据">
                  <input type="button" class="menu_button" id="na_import_data" value="导入数据">
              </div>
+--- a/README.md
++++ b/README.md
+@@ -1,908 +1,40 @@
+-# 多 Agent 叙事系统（Narrative Agent）
++# Save 0.5.0 · 原生聊天版
+ 
+-SillyTavern 扩展，通过多个**上下文隔离**的 Agent 将 LLM 从「直接续写」升级为「规划—写作—分析」的结构化叙事流水线，并提供可扩展的自定义工具接口。
++基于 Lol1p0p/narrative-agent 0.2.1，固定提交 `29a86d7323eb409131fdb28d926e3ea451eccb5c`。
+ 
+-***
++此版本针对手机浏览器中的普通角色聊天：保留原版摘要、上下文窗口、检查点与原文召回，保留酒馆原生聊天排版及实际回复对应的思考。
+ 
+-## 目录
++## 安装与 GitHub 上传
+ 
+-- [概述](#概述)
+-- [插件特点](#插件特点)
+-- [整体架构设计与重要配置参数](#整体架构设计与重要配置参数)
+-- [预设条目注意事项](#预设条目注意事项)
+-- [世界书条目分类](#世界书条目分类)
+-- [各 Agent 的 Prompt 构成](#各-agent-的-prompt-构成)
+-- [拼接 Prompt 的默认顺序与缓存命中策略](#拼接-prompt-的默认顺序与缓存命中策略)
+-- [工具系统介绍与示例](#工具系统介绍与示例)
+-- [MVU 变量管理](#mvu-变量管理)
+-- [最佳实践](#最佳实践)
+-- [已知限制](#已知限制)
++1. 解压本 ZIP，将根目录的全部文件上传到你的插件 GitHub 仓库根目录，覆盖同名文件。`manifest.json` 与 `index.js` 必须在同一层。
++2. 不要上传 ZIP 本身，也不要套上另一层文件夹。包内只有一套当前文件，没有旧版本副本。
++3. 在酒馆扩展管理中禁用原 Narrative Agent 和其他旧 Save，只启用这一份。更新后刷新网页，面板应显示 **Save 0.5.0 · 原生聊天版**。
++4. 勾选“启用省 Token 聊天”。原文召回按需使用；开启后沿用原版的规划与召回流程。
+ 
+-***
++没有修改角色卡、预设原文件或聊天主题。启用配置继续沿用 Save 0.4.1 的独立配置键，摘要和检查点沿用原版命名空间；没有删除旧聊天及旧版本文件。
+ 
+-## 概述
++## 改动对应的需求
+ 
+-本插件拦截 SillyTavern 默认的文本生成流程，替换为多 Agent 协作的叙事 Pipeline。每轮对话依次经过以下阶段：
++- 隐藏聊天末尾的“轮次、用户意图、叙事要点”，内部 `<summary>` 仍保存并用于压缩。
++- Relay 占位请求仍与原版一致，但临时消息和它的思考不会显示为角色回复。执行进度只显示在扩展面板。
++- 通过酒馆原生数据接口读取实际正文请求返回的思考，使用原生思考折叠显示。服务商没有返回思考时不编造，也不沿用 Relay 思考。
++- 正文直接使用酒馆本轮编译出的角色卡、用户设定、已启用预设、示例、作者注及消息顺序；不额外添加“叙事引擎”或“思维模式要求”。
++- 已有可靠摘要的旧历史按原版窗口压缩；未摘要的历史保留原文，避免摘要失败后静默丢失上下文。
++- 插件世界书读取入口返回空；启用时阻止原生世界书激活内容进入提示。角色卡与用户设定正常保留。
++- 停止会中止正在进行的原生 raw 请求。实际正文一旦返回即保留；摘要、检查点或保存失败不会触发重新写一份正文。
++- 同步原生滑动分支的正文、摘要和思考。切换聊天或编辑消息后，迟到结果不能覆盖新内容。
++- 保存继续调用酒馆原生接口。因为该接口内部会捕获错误，本版只观察保存响应状态，避免将失败误报为成功；不改请求、不使用另一条保存 API。
+ 
+-**串行模式（默认）**：
++## Input 和实际用量
+ 
+-```
+-用户输入 → 规划 → [工具执行] → 写作 → 合并分析 → [post_pipeline 工具] → 输出
+-```
++原版 Relay 的两条短消息逐字保留，没有修改计费插件或伪造 Token 数字。本地同一 Token Usage Tracker 显示 **Input=48**，与之前核实的原版基线一致；具体计数会随分词器和酒馆版本变化。
+ 
+-**合并输出模式（无 planning 工具且未启用原文召回时自动切换）**：
++这个小数字只覆盖计费插件捕获的中继请求。正常流程另有正文与摘要请求，开启召回时还会有规划请求，整轮真实用量应以接口记录为准。保留角色卡和预设需要相应输入，不能把中继数字当成全部费用。
+ 
+-```
+-用户输入 → 合并写作（规划+写作二合一） → 合并分析 → [post_pipeline 工具] → 输出
+-```
++## 验证范围
+ 
+-**并行模式（可选）**：
++19 项离线检查、24 个运行时脚本语法检查通过。独立 SillyTavern 1.18.0、390×844 手机视口、本地模拟接口完成 12 类集成检查，覆盖流式 Relay、实际正文思考、提示内容与参数对照、各阶段停止、召回、多轮压缩、滑动、续写、重生成、保存失败、聊天切换和刷新恢复。
+ 
+-```
+-用户输入 → 规划 → [工具执行] → 写作 → (合并分析 ‖ 独立工具) → 状态更新 → [依赖工具] → 输出
+-```
++正文仍沿用原版 raw 请求的非流式返回时机；实际回复返回后显示其思考，不新增另一条生成思考的请求。测试没有调用真实付费模型，也没有代替用户手机上的实际验证。模型文风验收依据是保留用户生效的提示信息，不能由模拟回复证明真实模型每次措辞相同。
+ 
+-- 插件检测 post\_pipeline 工具的 `context` 依赖：声明了 `story_summary` / `state_summary` / `known_context` 的工具在合并分析之后执行，其余工具可与合并分析并行。
+-
+-***
+-
+-## 插件特点
+-
+-- **上下文隔离**：每个 Agent 仅看到完成任务所需的最小上下文，减少噪声引入，提升指令遵循度
+-- **确定性状态管理**：默认提供确定性状态管理工具，LLM 只建议状态变更（10 种事件类型），代码层负责校验和写入，杜绝幻觉篡改；可通过声明MVU相关条目无缝替代
+-- **可扩展工具系统**：世界书作者可通过在世界书中添加 `[TOOL:name]` 条目定义 Planning 阶段工具和 Post-Pipeline 工具，无需修改插件代码；支持内置 `roll_dice` 与自定义 `code` 工具（JavaScript 计算逻辑）
+-- **世界书条目分类注入**：条目根据 position（`4=atDepth` / `0=before_char` / `1=after_char`）和激活策略（永久 / 关键词）自动路由到对应 Agent 的正确 message 位置，作者无需关心 Agent 内部结构
+-- **分段稳定前缀缓存**：对话历史窗口采用 n+m 分段生长策略，理想情况下历史对话部分的 token 级缓存命中率达 \~60%，显著降低 API 使用成本
+-- **轻量化默认**：无 planning 工具时自动切换为合并输出模式，比默认模式减少 1 次 API 请求
+-- **历史消息压缩**：自动压缩每轮对话的正文部分，提供summary作为主要的上下文存在形式
+-- **原文召回**：规划 Agent 可声明需要参考的历史轮次，插件从对话中提取对应轮次正文原文注入写作 Agent，启用后强制分离规划与写作 Agent
+-- **对话级状态隔离**：每个对话独立维护游戏状态和摘要，切换对话自动保存/恢复，删除聊天时自动清理残留数据（settings.json 中 chatStates + localStorage 中 checkpoints）
+-- **JS-Slash-Runner 渲染兼容**：Pipeline 完成后手动发射 `MESSAGE_EDITED`、`MESSAGE_UPDATED`、`CHARACTER_MESSAGE_RENDERED` 事件，确保 JS-Slash-Runner 等依赖事件系统的插件能正确检测到消息内容变更
+-- **LLM 调用次数透明**：默认 3 次（有 planning 工具时），无工具时自动降至 2 次，post\_pipeline 工具按需额外增加
+-
+-***
+-
+-## 整体架构设计与重要配置参数
+-
+-### 模块结构
+-
+-```
+-narrative-agent/
+-├── index.js              # 主入口，扩展初始化与设置面板注册
+-├── manifest.json         # 扩展清单
+-├── settings.html         # 设置面板 HTML
+-├── style.css             # 状态面板样式
+-│
+-├── orchestrator.js       # 核心编排器，完整 Pipeline 调度逻辑
+-├── bridge.js             # SillyTavern 事件桥接（拦截/替换/输出）
+-├── context-router.js     # 上下文路由层，为各 Agent 构造隔离 messages
+-│
+-├── agent-planning.js     # 规划 Agent，输出结构化写作指导
+-├── agent-writing.js      # 写作 Agent + 合并写作 Agent
+-├── agent-analysis.js     # 合并分析 Agent（事件提取 + 摘要压缩）
+-│
+-├── state.js              # StateManager（确定性游戏状态）+ SummaryStore（摘要存储）
+-├── store.js              # FileManager，localStorage 持久化与对话文件管理
+-├── readers.js            # CharacterReader（角色卡读取）+ UserPersonaReader（用户角色）
+-├── worldbook.js          # WorldInfoResolver，世界书条目加载/分类/缓存
+-│
+-├── tools.js              # 工具执行引擎（code/llm/roll_dice 三类工具）
+-├── dice.js               # 骰子引擎（普通/优势/劣势/爆炸四种模式）
+-├── mvu.js                # MVU 变量框架状态摘要生成
+-├── parser.js             # JSON 输出解析（规划/事件提取/合并分析）
+-├── llm.js                # LLM 调用封装（重试/错误处理）
+-│
+-├── constants.js          # 全局常量、默认配置、系统 Prompt 模板
+-├── utils.js              # 通用工具函数
+-├── settings.js           # 配置加载/保存/对话状态持久化
+-│
+-├── TUTORIAL.md           # 世界书作者教程
+-└── README.md             # 本文档
+-```
+-
+-### 核心数据流
+-
+-```
+-用户输入
+-  │
+-  ▼
+-SillyTavern (CHAT_COMPLETION_PROMPT_READY)
+-  │  拦截默认 prompt，替换为中继占位符
+-  ▼
+-GENERATION_ENDED — 执行完整 Pipeline
+-  │
+-  ├─ [一次性加载] WorldInfoResolver 分类加载世界书条目
+-  │   ├─ getConstantSystemEntries()      → position=4, constant=true 的条目 → 注入 system
+-  │   ├─ getConstantBeforeCharEntries()  → position=0, constant=true 的条目 → 注入 user
+-  │   ├─ getConstantAfterCharEntries()   → position=1, constant=true 的条目 → 注入 user
+-  │   ├─ getSelectiveActivatedEntries()  → constant=false, 主/副关键词匹配 → 注入 user
+-  │   └─ getActiveTools()                → [TOOL:*] 条目
+-  │
+-  ├─ ★ 无 planning 工具且未启用原文召回：合并写作模式
+-  │
+-  ├─ Agent 1: 规划 (Planning) ──→ 写作指导 JSON + tool_calls[] + text_recall[]
+-  │
+-  ├─ Planning 工具执行 ──→ codeToolResults / llmToolOutputs
+-  │
+-  ├─ ★ 原文召回 ──→ 从 chat 历史提取指定轮次原文
+-  │
+-  ├─ Agent 2: 写作 (Writing) ──→ 叙事正文
+-  │
+-  ├─ Agent 3: 合并分析 (Merged Analysis) ─→ 事件 JSON + 摘要条目
+-  │
+-  ├─ 状态更新 ──→ applyEvents() + appendEntries()
+-  │
+-  ├─ Post-pipeline 工具 ──→ llmToolOutputs（对用户可见）
+-  │
+-  └─ 整合输出 ──→ 写入 chat[] ──→ 发射 MESSAGE_EDITED / MESSAGE_UPDATED ──→ SillyTavern 前端渲染
+-```
+-
+-### 配置参数全览
+-
+-```javascript
+-{
+-  enabled: true,                         // 启用/禁用插件
+-  presetMode: "none",                    // 预设处理: none | split
+-  worldbookSource: "auto",               // 世界书来源: auto | card | world
+-  pipeline: {
+-    recentTurnsForPlanning: 4,           // 规划 Agent 最小窗口轮数 (n)
+-    planningGrowthMargin: 4,             // 规划 Agent 生长缓冲区 (m)
+-    recentTurnsForWriting: 3,            // 写作 Agent 最小窗口轮数 (n)
+-    writingGrowthMargin: 4,              // 写作 Agent 生长缓冲区 (m)
+-    parallelExecutionEnabled: false,     // 并行处理开关
+-    enableTextRecall: false,             // 原文召回开关
+-  },
+-  agents: {
+-    planning:       {},                  // 规划 Agent 预留配置
+-    writing:        {},                  // 写作 Agent 预留配置
+-    mergedAnalysis: { antiHallucination: true }, // 反幻觉标记
+-  },
+-  state: {
+-    autoSyncWorldInfo: true,             // 自动同步世界书到游戏状态
+-    persistToLocalStorage: true,         // 持久化到 localStorage
+-  },
+-}
+-```
+-
+-### n 和 m 参数含义
+-
+-`recentTurnsForXxx`（n）和 `xxxGrowthMargin`（m）控制分段稳定前缀窗口的行为：
+-
+-- 窗口从 n 轮开始自然积累，逐步生长到 n+m 轮
+-- 达到 n+m+1 轮时截断最早 m+1 轮，回到 n 轮
+-- 这种策略使历史对话部分的 token 序列在多数轮次之间保持稳定，从而最大化 LLM API 的前缀缓存命中率
+-
+-当前默认值：规划 n=4, m=4（窗口 4\~8 轮），写作 n=3, m=4（窗口 3\~7 轮）。
+-
+-### 状态管理器（StateManager）
+-
+-确定性游戏状态引擎，LLM 只建议变更，代码负责校验写入。状态字段：
+-
+-| 字段              | 类型                           | 说明                             |
+-| --------------- | ---------------------------- | ------------------------------ |
+-| `time`          | `{day, hour, minute}`        | 游戏内时钟，初始第1天 00:00              |
+-| `location`      | `string`                     | 当前位置，初始 `"起点"`                 |
+-| `inventory`     | `Record<string, number>`     | 物品 → 数量                        |
+-| `relationships` | `Record<string, number>`     | NPC名 → 关系值 (-100..100)         |
+-| `quests`        | `Record<string, QuestState>` | 任务状态 (active/completed/failed) |
+-| `flags`         | `Record<string, any>`        | 任意键值标记                         |
+-| `eventLog`      | `EventRecord[]`              | 事件日志（持久化最近 200 条）              |
+-
+-支持 10 种事件类型：`move`、`add_item`、`remove_item`、`set_relationship`、`modify_relationship`、`start_quest`、`advance_quest`、`complete_quest`、`set_flag`、`pass_time`。
+-
+-### 摘要存储（SummaryStore）
+-
+-每轮合并分析 Agent 将本轮对话压缩为一条摘要追加到列表。摘要格式为 `[第N轮] 用户意图：xxx | 叙事要点：yyy`。摘要置顶注入上下文以提升缓存命中率（每轮仅在尾部追加新条目，历史条目不变）。
+-
+-### LLM 调用次数
+-
+-| 阶段                   | 是否调 LLM | 说明                            |
+-| -------------------- | ------- | ----------------------------- |
+-| 规划                   | 是       | 有 planning 工具或启用原文召回时；否则与写作合并 |
+-| Planning code 工具     | 否       | 代码层执行                         |
+-| Planning llm 工具      | 是       | 仅当有 trigger=planning 的 llm 工具 |
+-| 写作                   | 是       | 有工具时；否则与规划合并                  |
+-| 合并分析                 | 是       | 事件提取 + 摘要压缩合并为单次调用            |
+-| Post-pipeline llm 工具 | 是       | 按工具数量逐个调用                     |
+-| 合并写作                 | 是       | 无工具时规划+写作二合一                  |
+-
+-***
+-
+-## 预设条目注意事项
+-
+-### 预设处理模式
+-
+-通过 `presetMode` 控制 SillyTavern 预设中 AI 回复设定文本的注入方式：
+-
+-| 模式      | 说明                                                                                    |
+-| ------- | ------------------------------------------------------------------------------------- |
+-| `none`  | 忽略预设，不注入任何 Agent。**默认模式**                                                             |
+-| `split` | 将预设中的 system 消息注入**规划 Agent system** + **写作 Agent system**；user 消息注入**写作 Agent user** |
+-
+-### 注入位置
+-
+-**`split`** **模式下预设注入具体位置**：
+-
+-- `presetContext.planningContext`（system 消息） → 规划 Agent system prompt 的**最开头**（在所有 `<worldinfo1>` 之前）
+-- `presetContext.writingSystemContext`（system 消息） → 写作 Agent system prompt 的**最开头**（在所有 `<worldinfo1>` 之前）
+-- `presetContext.writingUserContext`（user 消息） → 写作 Agent user prompt 的**最开头**（在所有 `<worldinfo2>` 之前）
+-
+-### 注意事项
+-
+-1. **split 模式下的预设不是万能的**：预设文本会注入 Agent 的 prompt，可能与 Agent 内置的任务指令产生冲突（如预设要求「只输出简短回复」但 Agent 指令要求「200-400 字」），**应避免在预设中给出与 Agent 任务相矛盾的长度/格式约束**
+-2. **合并输出模式下的预设注入**：`none` 模式下预设不注入任何 Agent；`split` 模式下的合并写作 Agent 的 prompt 可以认为是取规划和写作两个 agent 的并集
+-
+-***
+-
+-## 世界书条目分类
+-
+-### 条目注入策略总览
+-
+-条目通过 SillyTavern UI 中的 position 和 constant 设置决定注入目标：
+-
+-| UI 设置                 | position | constant | 注入目标 Agent | 注入 message 角色    |
+-| --------------------- | -------- | -------- | ---------- | ---------------- |
+-| @D（atDepth，角色=system） | 4        | true     | 规划 + 写作    | system           |
+-| ↑Char（before\_char）   | 0        | true     | 规划 + 写作    | user             |
+-| ↓Char（after\_char）    | 1        | true     | 写作         | user（worldinfo3） |
+-| 关键词激活                 | 任意       | false    | 规划 + 写作    | user（worldinfo3） |
+-
+-### 具体分类逻辑
+-
+-#### 1. `getConstantSystemEntries()` — 注入 system 层
+-
+-**筛选条件**：
+-
+-- `constant === true`
+-- `position === 4`（atDepth）
+-- 非格式化条目
+-
+-**注入目标**：规划 Agent 和写作 Agent 的 system message，包裹在 `<worldinfo1>` 标签内。按 `order` 排序。
+-
+-**典型用途**：叙事规则、全局世界观设定、写作风格约束等需要在系统层面固定注入的内容。
+-
+-#### 2. `getConstantBeforeCharEntries()` — 注入 user 层
+-
+-**筛选条件**：
+-
+-- `constant === true`
+-- `position === 0`（before\_char）
+-- 非格式化条目
+-
+-**注入目标**：规划 Agent 和写作 Agent 的 user message，包裹在 `<worldinfo2>` 标签内。
+-
+-**典型用途**：重要角色相关设定、背景描述等需要在常态化出现的内容。
+-
+-#### 3. `getConstantAfterCharEntries()` — 注入 user 层（worldinfo3）
+-
+-**筛选条件**：
+-
+-- `constant === true`
+-- `position === 1`（after\_char）
+-- 非格式化条目
+-
+-**注入目标**：写作 Agent 的 user message，与关键词条目合并包裹在 `<worldinfo3>` 标签内。
+-
+-#### 4. `getSelectiveActivatedEntries()` — 关键词匹配注入
+-
+-**筛选条件**：
+-
+-- `constant === false`
+-- 主关键词（`key`）或副关键词（`keysecondary`）匹配最近对话文本 + 游戏状态摘要
+-
+-**注入目标**：规划 Agent 和写作 Agent 的 user message，包裹在 `<worldinfo3>` 标签内。按 `order` 排序。
+-
+-**匹配文本构成**：最近 n 轮对话的 `user + assistant` 拼接 + 当前 `stateSummary`。
+-
+-### 自动过滤的条目类型
+-
+-以下 comment 前缀或 content 格式的条目会被自动过滤，**不会注入任何 Agent**：
+-
+-| comment 前缀         | 用途                                                                          |
+-| ------------------ | --------------------------------------------------------------------------- |
+-| `[TOOL:*]`         | 工具定义                                                                        |
+-| `[UI]`             | UI 显示（暂无功能，等待后续更新）                                                          |
+-| `[initvar]`        | MVU 初始化变量                                                                   |
+-| `[mvu_update]`     | MVU 变量更新规则                                                                  |
+-| content 为有效工具 JSON | 即使 comment 被清除，content 中的 `{"type":"llm"/"code","function":...}` 结构也会被识别并过滤 |
+-
+-### 世界书来源选择
+-
+-| 来源   | 配置值     | 说明                                        |
+-| ---- | ------- | ----------------------------------------- |
+-| 自动   | `auto`  | 优先读取卡包内嵌，无则回退到世界书库（默认）                    |
+-| 卡包内嵌 | `card`  | 仅从角色卡 PNG 内嵌的 `character_book.entries` 读取 |
+-| 世界书库 | `world` | 仅从世界书库按名称加载                               |
+-
+-### 缓存机制
+-
+-`WorldInfoResolver` 内部维护条目缓存：卡包来源时通过条目特征指纹（comment、keys、content 等简单哈希）判断是否需要刷新，世界书来源通过世界书名称作为缓存键。切换对话或手动刷新时清除缓存。
+-
+-***
+-
+-## 各 Agent 的 Prompt 构成
+-
+-### Agent 1：规划 Agent（Planning）
+-
+-**触发条件**：存在 `trigger=planning` 的工具，或启用了原文召回。
+-
+-**System Prompt 构成**（按拼接顺序）：
+-
+-```
+-{presetContext.planningContext}          ← 预设 system 消息（split 模式）
+-<worldinfo1>                             ← constantSystemEntries（position=4 永久条目）
+-{条目1}
+-{条目2}
+-...
+-</worldinfo1>
+-PLANNING_SYSTEM_SUFFIX                   ← 内置规划引擎指令（constants.js）
+-{toolListText}                           ← 当前可用的 planing 工具列表（仅检测到工具时注入）
+-```
+-
+-**User Prompt 构成**（按拼接顺序）：
+-
+-```
+-<worldinfo2>                             ← constantBeforeCharEntries（position=0 永久条目）
+-{条目1}
+-{条目2}
+-...
+-</worldinfo2>
+-<story_summary>                          ← SummaryStore 全部摘要
+-{摘要列表}
+-</story_summary>
+-<user_persona>                           ← 用户角色设定
+-{persona描述}
+-</user_persona>
+-<recent_turns>                           ← 最近 n 轮对话（分段稳定窗口）
+-[轮1] 用户: ... | AI: ...
+-[轮2] 用户: ... | AI: ...
+-</recent_turns>
+-<worldinfo3>                             ← constantAfterCharEntries + selectiveActivatedEntries
+-{条目1}
+-{条目2}
+-...
+-</worldinfo3>
+-<state_summary>                          ← 当前游戏状态（来自 StateManager 或 MVU）
+-时间：第1天 00:00
+-地点：起点
+-物品：无
+-...
+-</state_summary>
+-<user_input>                             ← 用户最新输入
+-{用户消息}
+-</user_input>
+-请生成写作指导。
+-```
+-
+-**输出格式**（JSON）：
+-
+-```json
+-{
+-  "narrative_direction": "不少于100字的叙事方向和场景构建",
+-  "scene_setting": "场景的时间地点环境简介",
+-  "key_points": ["要点1", "要点2", ...],
+-  "tone": "紧张",
+-  "pacing": "中",
+-  "continuity_notes": ["伏笔1", "细节2"],
+-  "tool_calls": [{ "tool": "name", "params": {} }],
+-  "text_recall": [1, 3]
+-}
+-```
+-
+-### Agent 2：写作 Agent（Writing）
+-
+-**触发条件**：规划阶段完成后执行。合并输出模式下使用 `runMergedWritingAgent`。
+-
+-**System Prompt 构成**（按拼接顺序）：
+-
+-```
+-{presetContext.writingSystemContext}     ← 预设 system 消息（split 模式）
+-<worldinfo1>                             ← constantSystemEntries（与规划 Agent 共享）
+-{条目1}
+-{条目2}
+-...
+-</worldinfo1>
+-WRITING_SYSTEM_SUFFIX                    ← 内置写作引擎指令（constants.js）
+-（若有工具结果）系统追加：工具执行结果已由系统确定，必须严格按结果走向写作
+-```
+-
+-**User Prompt 构成**（按拼接顺序）：
+-
+-```
+-{presetContext.writingUserContext}       ← 预设 user 消息（split 模式）【最开头】
+-<worldinfo2>                             ← constantBeforeCharEntries
+-{条目1}
+-...
+-</worldinfo2>
+-<user_persona>                           ← 用户角色设定
+-{persona描述}
+-</user_persona>
+-<recent_turns>                           ← 最近 n 轮对话（分段稳定窗口）
+-[轮1] 用户: ... | AI: ...
+-</recent_turns>
+-<worldinfo3>                             ← constantAfterCharEntries + selectiveActivatedEntries
+-{条目1}
+-...
+-</worldinfo3>
+-<text_recall>                            ← 原文召回结果（仅启用 textRecall 且有命中时）
+-[第N轮]
+-原文内容...
+-</text_recall>
+-<writing_guide>                          ← 规划 Agent 的 JSON 输出格式化
+-叙事方向：...
+-场景设置：...
+-要点：...
+-基调：...，节奏：...
+-延续细节：...
+-</writing_guide>
+-<tool_results>                           ← Planning 工具执行结果（仅当有工具调用时）
+-检定结果：1d20 = [15]+2 = 17 (DC 12) → 成功
+-</tool_results>
+-<user_input>                             ← 用户最新输入
+-{用户消息}
+-</user_input>
+-```
+-
+-### Agent 3：合并分析 Agent（Merged Analysis）
+-
+-**触发条件**：每轮叙事生成后必然执行。
+-
+-**System Prompt**（完整片段，来自 `constants.js` 的 `MERGED_ANALYSIS_SYSTEM`）：
+-
+-包含 `SHARED_ANALYSIS_PREFIX`（核心原则） + 事件提取任务 + 摘要压缩任务两者合一。
+-
+-**User Prompt 构成**（由 `context-router.js` 构建）：
+-
+-```
+-{已有摘要}                                ← 置顶以提升缓存命中
+-{当前世界状态}
+-本轮对话内容 + 指令
+-```
+-
+-**输出格式**（JSON）：
+-
+-```json
+-{
+-  "events": [{ "type": "move", "params": { "location": "矿洞" } }],
+-  "summary_entries": ["[第3轮] 用户意图：探索矿洞 | 叙事要点：兰韦德进入矿洞..."]
+-}
+-```
+-
+-### 合并写作 Agent（Merged Writing）
+-
+-**触发条件**：无 planning 工具且未启用原文召回时，跳过独立规划，直接使用合并写作。
+-
+-**System Prompt 构成**：
+-
+-```
+-{presetContext.planningContext}          ← 预设 system 消息
+-<worldinfo1>                             ← constantSystemEntries
+-{条目1}
+-...
+-</worldinfo1>
+-MERGED_WRITING_SYSTEM_SUFFIX             ← 内置合并写作指令
+-```
+-
+-**User Prompt 构成**（与写作 Agent 类似，多 `<story_summary>` 和 `<state_summary>`）：
+-
+-```
+-{presetContext.writingUserContext}
+-<worldinfo2>
+-...
+-</worldinfo2>
+-<user_persona>
+-...
+-</user_persona>
+-<story_summary>
+-{摘要列表}
+-</story_summary>
+-<recent_turns>
+-...
+-</recent_turns>
+-<worldinfo3>
+-...
+-</worldinfo3>
+-<text_recall>                            ← 合并模式下同样支持原文召回
+-...
+-</text_recall>
+-<state_summary>
+-{游戏状态}
+-</state_summary>
+-<user_input>
+-{用户消息}
+-</user_input>
+-【思维模式要求】...
+-```
+-
+-***
+-
+-## 拼接 Prompt 的默认顺序与缓存命中策略
+-
+-### 各 Agent User Prompt 片段的拼接顺序
+-
+-#### 规划 Agent user prompt 顺序
+-
+-| 序号 | 片段   | 标签                | 数据来源                                                               |
+-| -- | ---- | ----------------- | ------------------------------------------------------------------ |
+-| 1  | 前置条目 | `<worldinfo2>`    | `getConstantBeforeCharEntries()`                                   |
+-| 2  | 故事摘要 | `<story_summary>` | `summaryStore.getAllSummaries()`                                   |
+-| 3  | 用户角色 | `<user_persona>`  | `userPersonaReader.getPersonaInfo()`                               |
+-| 4  | 最近叙事 | `<recent_turns>`  | 分段稳定窗口中的最近轮次                                                       |
+-| 5  | 匹配条目 | `<worldinfo3>`    | `getConstantAfterCharEntries()` + `getSelectiveActivatedEntries()` |
+-| 6  | 游戏状态 | `<state_summary>` | `StateManager.getSummary()` 或 MVU 摘要                               |
+-| 7  | 用户输入 | `<user_input>`    | 用户消息原文                                                             |
+-| 8  | 指令   | 纯文本               | `"请生成写作指导。"`                                                       |
+-
+-#### 写作 Agent user prompt 顺序
+-
+-| 序号 | 片段      | 标签                | 数据来源                                                               |
+-| -- | ------- | ----------------- | ------------------------------------------------------------------ |
+-| 1  | 预设 user | `<user_preset>`   | `presetContext.writingUserContext`（split 模式）                       |
+-| 2  | 前置条目    | `<worldinfo2>`    | `getConstantBeforeCharEntries()`                                   |
+-| 3  | 用户角色    | `<user_persona>`  | `userPersonaReader.getPersonaInfo()`                               |
+-| 4  | 最近叙事    | `<recent_turns>`  | 分段稳定窗口中的最近轮次                                                       |
+-| 5  | 匹配条目    | `<worldinfo3>`    | `getConstantAfterCharEntries()` + `getSelectiveActivatedEntries()` |
+-| 6  | 原文召回    | `<text_recall>`   | 从 chat\[索引] 中提取的 `<context>` 原文                                    |
+-| 7  | 写作指导    | `<writing_guide>` | 规划 Agent 输出的格式化指导                                                  |
+-| 8  | 工具结果    | `<tool_results>`  | Planning 阶段 code/llm 工具执行结果                                        |
+-| 9  | 用户输入    | `<user_input>`    | 用户消息原文                                                             |
+-
+-#### 合并分析 Agent user prompt 顺序
+-
+-| 序号 | 片段     | 说明                          |
+-| -- | ------ | --------------------------- |
+-| 1  | 已有摘要   | **置顶**，提升缓存命中率（每轮仅在尾部追加新条目） |
+-| 2  | 当前世界状态 | stateSummary                |
+-| 3  | 本轮对话内容 | narrativeText + userInput   |
+-| 4  | 指令     | 事件提取 + 摘要压缩指令               |
+-
+-### 分段稳定前缀缓存策略
+-
+-#### 工作原理
+-
+-传统的滑动窗口每轮都会丢弃最早一轮并添加最新一轮，导致整个对话历史的 token 序列完全变化，**前缀缓存命中率为 0%**。
+-
+-本插件采用 n+m 分段生长策略：
+-
+-```
+-轮次 1:  窗口 [1]              (1轮)
+-...
+-轮次 n:  窗口 [1,2,...,n]      (n轮)
+-轮次 n+1: 窗口 [1,2,...,n+1]    (n+1轮，生长中)
+-...
+-轮次 n+m: 窗口 [1,...,n+m]      (n+m轮，达到上限)
+-轮次 n+m+1: 窗口 [m+2,...,n+m+1] (截断前 m+1 轮，回退到 n 轮)
+-轮次 n+m+2: 窗口 [m+2,...,n+m+2] (继续生长)
+-```
+-
+-在第 n+2 到 n+m 轮之间，窗口仅追加新轮，历史部分完全不变 → 缓存命中。在第 n+m+1 轮截断时缓存失效，但随后又重新进入生长阶段。
+-
+-#### 理论缓存命中率
+-
+-历史消息部分的 token 级缓存命中率 H = 1 − (2(2(n+m)-1)) / ((2n+m)(m+1))
+-
+-**默认配置下的命中率**：
+-
+-| Agent | n | m | 窗口范围   | 缓存命中率  |
+-| ----- | - | - | ------ | ------ |
+-| 规划    | 4 | 5 | 4\~9 轮 | 无意义    |
+-| 写作    | 3 | 6 | 3\~9 轮 | ≈60% |
+-
+-#### 设计考量
+-
+-- **与 Agent 职责匹配**：规划 Agent 需要更多上下文来生成全局指导，写作 Agent 更聚焦近期叙事
+-- **m 不宜过大**：m 越大窗口变化周期越长，缓存效益越好，但峰值输入 token 数越高。默认 m=4 表现均衡
+-- **合并分析不受影响**：合并分析的已有摘要在 prompt 中**置顶**，每轮仅尾部追加本轮的新条目，头部几乎完全不变，天然具备高缓存命中
+-
+-***
+-
+-## 工具系统介绍与示例
+-
+-### 工具定义方式
+-
+-世界书作者通过 `[TOOL:name]` comment 前缀的条目定义工具。条目的 `content` 字段为 JSON 格式。
+-
+-### 工具分类
+-
+-按 `trigger` 字段分为两类：
+-
+-| trigger         | 执行时机                    | 结果可见性               | 典型用途           |
+-| --------------- | ----------------------- | ------------------- | -------------- |
+-| `planning`      | 规划 Agent 之后、写作 Agent 之前 | 仅传递给写作 Agent，用户不可见  | 骰子检定、数值计算、内部查询 |
+-| `post_pipeline` | 写作 + 分析之后               | 拼接到 chat\[] 末尾，用户可见 | 状态面板生成、外部输出    |
+-
+-按 `type` 字段分为两类：
+-
+-| type   | 执行方式      | 说明                                      |
+-| ------ | --------- | --------------------------------------- |
+-| `code` | 代码层确定性执行  | 内置 `roll_dice` 或自定义 JS 代码（通过 `code` 字段） |
+-| `llm`  | 调用 LLM 生成 | 通过 `system_prompt` 定义行为                 |
+-
+-### 条目 content JSON 结构
+-
+-```jsonc
+-{
+-  "type": "code",                        // "code" | "llm"
+-  "trigger": "planning",                 // "planning" | "post_pipeline"
+-  "function": {
+-    "name": "my_tool",                   // 工具唯一名称，规划 Agent 通过 tool_calls 引用
+-    "description": "工具用途描述，注入规划 Agent 的 toolListText",
+-    "parameters": {                      // 参数 schema，注入规划 Agent
+-      "type": "object",
+-      "properties": {
+-        "param1": { "type": "string", "description": "参数说明" }
+-      },
+-      "required": ["param1"]
+-    }
+-  },
+-  "context": ["state_summary", "user_input"],  // llm 工具的上下文声明（可选）
+-  "system_prompt": "\n你是一个...",               // llm 工具的 system prompt
+-  "code": "return params.a + params.b;",        // code 工具的 JS 代码（仅自定义 code 工具）
+-  "output_tag": "state_panel",                  // post_pipeline llm 工具的输出 XML 标签名（可选）
+-  "tag_lookback": 3                             // 回看前 N 轮的 output_tag 内容（可选）
+-}
+-```
+-
+-### 内置工具：roll\_dice
+-
+-`roll_dice` 是内置的 code 工具，`type=code` 且 `function.name="roll_dice"`，无需提供 `code` 字段。支持四种模式：
+-
+-| 模式             | 说明            | 表达式示例           |
+-| -------------- | ------------- | --------------- |
+-| `normal`       | 普通掷骰          | `1d20`, `2d6+3` |
+-| `advantage`    | 优势（掷两次取高）     | `1d20`          |
+-| `disadvantage` | 劣势（掷两次取低）     | `1d20`          |
+-| `exploding`    | 爆炸骰（掷出最大值时追加） | `1d6`           |
+-
+-规划 Agent 在 `tool_calls` 中声明 `{"tool": "roll_dice", "params": {"expr": "1d20+5", "mode": "advantage", "dc": 15}}`。
+-
+-### 自定义 code 工具
+-
+-插件通过 `new Function("params", "state", code)` 执行代码，代码接收两个变量：
+-
+-| 变量       | 说明                                             |
+-| -------- | ---------------------------------------------- |
+-| `params` | 规划 Agent 传入的工具参数对象                             |
+-| `state`  | 当前 `StateManager` 状态快照 `{}`，可通过 `state.变量名` 访问 |
+-
+-通过 `return` 输出结果。注册前自动进行语法校验（`new Function` 解析），运行时异常不会中断 Pipeline。
+-
+-**示例**：计算伤害减免
+-
+-```jsonc
+-// comment: [TOOL:calc_damage]
+-// content:
+-{
+-  "type": "code",
+-  "trigger": "planning",
+-  "function": {
+-    "name": "calc_damage",
+-    "description": "计算最终伤害：基础伤害 - 护甲值，最低为 1",
+-    "parameters": {
+-      "type": "object",
+-      "properties": {
+-        "base_damage": { "type": "number", "description": "基础伤害值" },
+-        "armor": { "type": "number", "description": "护甲值" }
+-      },
+-      "required": ["base_damage"]
+-    }
+-  },
+-  "code": "const dmg = params.base_damage - (params.armor || 0); return Math.max(1, dmg);"
+-}
+-```
+-
+-*注意 * 世界书条目内容要求是完整且正确的json结构，如果您的内容（prompt/code）已经被默认结构的双引号包裹，则需要自行将内容中的双引号做转义
+-
+-### llm 工具与上下文声明
+-
+-llm 工具通过 `context` 数组声明需要注入的上下文片段。支持的 context key 定义在 `constants.js` 的 `CANONICAL_CONTEXT_ORDER` 中：
+-
+-```
+-world_full → story_summary → recent_turns → narrative_text → writing_guide
+-→ state_summary → user_persona → user_input → dice_results → known_context
+-```
+-
+-声明中的 key 按此固定顺序排列后注入 tool 的 user message。
+-
+-### Post-pipeline llm 工具的 output\_tag 机制
+-
+-当 post\_pipeline 工具声明 `output_tag` 和 `tag_lookback` 后，插件从 `ctx.chat` 中提取最近 `tag_lookback` 轮该标签的内容，拼接为 `<tool_history>` 块注入工具自身的 LLM 上下文。
+-
+-**典型用例**：state\_panel 工具声明 `"output_tag": "state_panel"`, `"tag_lookback": 3`，每轮可回顾前三轮自己输出的面板内容，实现跨轮连贯性。此内容仅工具自身可见，不会暴露给规划、写作、分析等 Agent。
+-
+-### 工具执行时机总结
+-
+-```
+-规划 Agent 输出 tool_calls[]
+-        │
+-        ▼
+-  ┌─ code 工具 → ToolExecutor.execute() → 代码层执行 → 结果注入写作 Agent
+-  │
+-  └─ llm 工具 (trigger=planning) → callLLM → 结果注入写作 Agent
+-        │
+-        ▼
+-  写作 Agent 生成叙事正文
+-        │
+-        ▼
+-  合并分析 Agent 提取事件 + 压缩摘要
+-        │
+-        ▼
+-  ┌─ post_pipeline llm 工具 → callLLM → 结果追加到 chat[]
+-  │
+-  └─（如有 MVU 条目）mvu_extract 自动工具 → 应用 patches
+-```
+-
+-***
+-
+-## MVU 变量管理
+-
+-### 概述
+-
+-插件与 SillyTavern 的 MVU（Message Variable Update）变量框架集成，提供结构化的变量状态管理。当世界书中存在 `[initvar]` 或 `[mvu_update]` 条目时，插件自动启用 MVU 集成。
+-
+-### 初始化变量：\[initvar]
+-
+-`[initvar]` 条目定义初始变量树。插件在首个对话轮次时自动读取并初始化 MVU 的 `stat_data`。
+-
+-**content 格式**：JSON 对象或缩进文本（通过 `parseTextToVariables()` 解析）。
+-
+-```jsonc
+-// comment: [initvar]
+-// content:
+-{
+-  "主角": {
+-    "生命值": 100,
+-    "信用点数": 500,
+-    "改装仓库": ["基础扫描器", "维修工具包"]
+-  },
+-  "世界": {
+-    "当前地点": "起点",
+-    "天气": "晴朗"
+-  }
+-}
+-```
+-
+-**执行逻辑**：
+-
+-1. Pipeline 首轮时检查 MVU 是否已有数据，有则跳过初始化
+-2. 解析 `[initvar]` 条目的 content（优先 JSON，回退 YAML 式文本）
+-3. 通过 `Mvu.replaceMvuData()` 写入 `stat_data`
+-
+-### 变量更新规则：\[mvu\_update]
+-
+-`[mvu_update]` 条目定义变量更新的约束规则，其 content 会注入 `mvu_extract` 自动工具的 system prompt 中，指导 LLM 如何提取变量变更。
+-
+-```jsonc
+-// comment: [mvu_update]
+-// content:
+-当角色受到伤害时，减少 /主角/生命值
+-当角色获得信用时，增加 /主角/信用点数
+-当角色获得新装备时，向 /主角/改装仓库 末尾插入
+-```
+-
+-**规则格式**为自然语言，由 LLM 理解后转换为 JSON Patch 操作。
+-
+-### 自动工具：mvu\_extract
+-
+-当世界书中存在 `[initvar]` 或 `[mvu_update]` 条目时，插件自动注册 `mvu_extract` 工具（`trigger=post_pipeline`，`type=llm`）。
+-
+-**System Prompt 构成**：
+-
+-```
+-SHARED_ANALYSIS_PREFIX
+-【任务：变量状态提取】
+-从叙事文本中提取世界状态变更，输出 JSON Patch 格式。
+-
+-JSON Patch 操作类型：
+-- replace: 替换字段值
+-- delta: 数值增减
+-- insert: 创建新字段或向数组追加
+-- remove: 删除字段
+-- move: 移动字段
+-
+-path 使用 / 分隔的 JSON Pointer 路径，对应变量树中的层级。
+-
+-如果没有状态变更，输出：{ "patches": [] }
+-
+-补充规则：
+-- 仅对「当前变量状态」中列出的已有路径执行操作，不要凭空创建新的一级分类
+-
+-以下为变量更新规则：
+-{mvuRules}
+-```
+-
+-**输出格式**（JSON Patch）：
+-
+-```json
+-{
+-  "patches": [
+-    { "op": "replace", "path": "/世界/当前地点", "value": "矿洞" },
+-    { "op": "delta", "path": "/主角/信用点数", "value": -200 },
+-    { "op": "insert", "path": "/主角/改装仓库/-", "value": "涡轮增压器V2" }
+-  ]
+-}
+-```
+-
+-### 状态摘要生成
+-
+-`getMvuStateSummary()` 函数（`mvu.js`）将 MVU 变量树递归展开为扁平文本，供 Agent 的 `<state_summary>` 使用。当 MVU 数据不可用时，自动回退到 `StateManager.getSummary()`。
+-
+-### MVU 与 StateManager 的关系
+-
+-- **StateManager**：插件内置的确定性状态引擎，管理 10 种标准事件类型
+-- **MVU**：SillyTavern 社区常用变量框架，提供更灵活的自定义变量树
+-- **优先级**：`_getStateSummary()` 先尝试从 MVU 读取，失败时回退到 StateManager
+-- **回滚同步**：对话回滚（重生成）时，MVU 数据从 checkpoint 恢复
+-
+-***
+-## 最佳实践
+-
+-### 1. 保持预设条目最小化启用
+-
+-本插件绕过了sillytavern原生的prompt拼接流程，直接读取预设条目与世界书条目内容并进行拼接，且拼接时已经进行了XML标签包裹。使用时，应当将预设中所有XML标签条目以及所有包含格式要求的条目*全部关闭*，以免引入噪音。
+-预设中，只需要保留注入system message的元认知/破甲条目以及您需要的文风条目，请关闭对思维链结构提出要求的条目！！！
+-
+-### 2. 优化世界书条目结构
+-
+-对于所有开启的条目，插件默认会将位置为`系统`的条目作为`worldinfo1`注入`system message`;将所有的位置为`before_char`且*永久激活*（蓝灯）的条目作为`worldinfo2`注入`user message`;将所有的位置为`after_char`或*关键词激活*（绿灯）的非系统条目作为`worldinfo3`注入`user message`。
+-在编排世界书条目时，您应当将最关键的核心设定设置为`系统`条目，将篇幅较大且剧情强依赖的条目设置为`before_char`位置的蓝灯条目。由于`worldinfo3`在多次重新生成以外的情况均无法命中缓存，您应当精简这部分的条目内容。
+-尽量不要让`worldinfo1`和`worldinfo2`中的条目在对话过程中发生变化，变化的条目应当尽量设置为`after_char`位置。
+-
+-### 3. 精简TOOL上下文与输出
+-
+-在设计`TOOL`时，您应当遵循最小化上下文注入原则，即仅注入必要的上下文，避免引入噪音。
+-对于`TOOL`的输出，仍然建议您在prompt中明确XML标签包裹，以便可能的工具输出回顾以及正则化处理。
+-依然建议您使用`TOOL`时只获取XML包裹的关键内容，HTML格式使用正则化处理，这是出于LLM输出速度的考量。输出token量将主导任务完成时长，轻量化的LLM输出将显著提升响应速度。
+-
+-***
+-## 已知限制
+-
+-### 1. 世界书条目数量影响上下文长度
+-
+-所有 `constant=true` 的条目均为无条件全量注入。若世界书体量庞大（条目数 > 50），每轮注入的 token 数可能超过数千，**影响 API 成本与响应速度**。建议：
+-
+-- 将大段设定文本拆分到关键词触发的 `selective` 条目中，而非全量注入
+-- 合理使用 `order` 排序：不改变的关键设定置前以利用缓存，频繁变化的内容置后
+-
+-### 2. 规划 Agent 仅感知世界书摘要
+-
+-规划 Agent 只能看到 `story_summary`（摘要）而非完整叙事历史。对于需要精确引用几年前对话细节的场景，建议启用**原文召回**功能并让规划 Agent 声明 `text_recall`。
+-
+-### 3. 工具系统的 code 执行沙箱有限
+-
+-`new Function("params", "state", code)` 在浏览器主线程中执行，**无真正沙箱隔离**。自定义 code 工具的作者应确保代码无副作用（不修改全局变量、不发起网络请求）。插件仅做语法校验，不做静态安全检查。
+-
+-### 4. 合并分析的事件提取依赖 LLM 理解力
+-
+-事件提取（10 种类型）完全依赖 LLM 对叙事文本的理解。当 LLM 能力较弱或上下文过长时，可能出现：
+-
+-- 遗漏关键事件（如角色移动未提取 `move` 事件）
+-- 时间推断偏差（`pass_time` 的 amount 不准确）
+-- 物品增减参数错误（`quantity` 与实际不符）
+-
+-StateManager 层会校验参数合法性，但不合法的事件会被**拒绝**而非修正，可能导致状态与叙事脱节。
+-
+-### 5. 并行模式下的确定性
+-
+-启用 `parallelExecutionEnabled` 后，独立 post\_pipeline 工具与合并分析 Agent 并发调用，但写入 `chat[]` 的顺序需要桥接层处理。当前实现中并行仅缩短耗时，输出结果仍按串行顺序拼接，但若两个并发的 LLM 调用产生冲突性内容（如状态面板与叙事摘要描述矛盾），**无自动协调机制**。
+-
+-### 6. 预设 split 模式的局限性
+-
+-`split` 模式下预设的 system 消息注入规划和写作两个 Agent，但无法选择性注入。例如无法实现「某条规则仅规划 Agent 可见而写作 Agent 不可见」的细粒度控制。如有此需求，建议将对应的内容以世界书条目的形式实现。
+-
+-### 7. 用户角色设定仅注入规划与写作 Agent
+-
+-`userPersonaReader` 读取的 `persona_description` 仅注入规划 Agent 和写作 Agent 的 user prompt，不会注入合并分析 Agent。这意味着合并分析 Agent 无法感知用户角色的具体设定，可能在 `summary_entries` 中将用户行为概括得不够精确。
+-
+-### 8. 无内置上下文长度警告
+-
+-插件不监控各 Agent prompt 的最终 token 数是否超出模型限制。当世界书条目过多、对话轮次过长时，可能导致 prompt 超出模型上下文窗口而截断。建议通过 API 侧设置合理 `max_tokens` 或监控控制台日志中的请求失败信息。
+-
+-### 9. 仅有文字状态，无内置数值系统
+-
+-`StateManager` 提供的是结构化键值状态管理，但本身不带数值计算（如伤害公式、等级系统）。需要此类功能的世界书作者应通过自定义 code 工具实现，或使用 MVU 变量框架。
+-
+-### 10. 无法在正文中添加格式化信息
+-
+-当前插件不允许在pipeline内对写作agent生成的<context>内容做修改与格式化输出，因此正文内容将是纯文本的。
+-未来将会考虑在pipeline尾部追加由[UI]条目指导的agent对<context>内的正文进行格式化内容添加或重构，单独提供<UI>字段以供前端展示，<context>字段使用正则化隐藏。
++版本差异和验证细节见 `PATCH-NOTES.md`、`SOURCE-DIFF.patch`、`UPSTREAM-PROVENANCE.json`。原作者说明见 `UPSTREAM-README.md`，原作者与 MIT 许可保留在 `LICENSE`。
+--- /dev/null
++++ b/native-chat.js
+@@ -0,0 +1,148 @@
++// Preserve ST's compiled prompts. Only summarized history is compressed.
++import { getSTContext } from './utils.js';
++import { getGenerationSession } from './generation-session.js';
++import { withoutSummaryFooter } from './save-custom.js';
++
++let latest = null;
++let installed = false;
++let regexHelpers = null;
++
++const clone = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
++const normalize = value => String(value ?? '').replace(/\r\n/g, '\n').trim();
++const contentText = content => typeof content === 'string' ? content :
++  Array.isArray(content) ? content.filter(x => x.type === 'text').map(x => x.text).join('\n') : '';
++
++function toMessage(item) {
++  return {
++    role: item.role, content: clone(item.content),
++    ...(item.name ? { name: item.name } : {}),
++    ...(item.tool_calls ? { tool_calls: clone(item.tool_calls) } : {}),
++    ...(item.role === 'tool' ? { tool_call_id: item.identifier } : {}),
++    ...(item.signature ? { signature: item.signature } : {}),
++    ...(item.reasoning ? { reasoning: item.reasoning } : {}),
++  };
++}
++
++function flatten(item, path = []) {
++  const id = item.identifier || '';
++  if (typeof item.getCollection === 'function') return item.getCollection().filter(Boolean).flatMap(child => flatten(child, [...path, id]));
++  if (!item.role || (!item.content && !item.tool_calls)) return [];
++  return [{ identifier: id, path, message: toMessage(item), sourceIndex: null }];
++}
++
++export function captureNativeCompletion(completion, ctx = getSTContext(), regex = regexHelpers) {
++  const root = completion.getMessages();
++  const nodes = flatten(root);
++  const raw = (ctx.chat || []).map((m, index) => ({ index, role: m.is_user ? 'user' : 'assistant', is_system: m.is_system, mes: m.mes || '', owned: m.extra?.save_native_writer === 1 }));
++  const candidates = raw.filter(m => !m.is_system && m.mes);
++  let cursor = candidates.length - 1;
++  // Match from the end so repeated short replies keep their original identity.
++  for (const node of [...nodes].reverse()) {
++    if (!node.path.includes('chatHistory') || !/^chatHistory-/.test(node.identifier)) continue;
++    const text = normalize(contentText(node.message.content));
++    for (let i = cursor; i >= 0; i--) {
++      const source = candidates[i];
++      if (source.role !== node.message.role) continue;
++      let expected = source.mes;
++      if (regex?.getRegexedString) expected = regex.getRegexedString(expected,
++        source.role === 'user' ? regex.regex_placement.USER_INPUT : regex.regex_placement.AI_OUTPUT,
++        { isPrompt: true, depth: candidates.length - i - 1 });
++      const target = normalize(expected);
++      if (!target || !(text === target || text.includes(target))) continue;
++      node.sourceIndex = source.index;
++      cursor = i - 1;
++      break;
++    }
++  }
++  return { nodes, raw, chat: ctx.chat, chatId: ctx.getCurrentChatId?.() ?? ctx.chatMetadata?.chat_id, captured: Date.now() };
++}
++
++export async function installNativePromptCapture(isEnabled, isRunning) {
++  if (installed) return;
++  const [openai, regex] = await Promise.all([
++    import(new URL('../../../openai.js', import.meta.url).href),
++    import(new URL('../../regex/engine.js', import.meta.url).href),
++  ]);
++  regexHelpers = regex;
++  const manager = openai.promptManager;
++  if (!manager?.setChatCompletion) throw new Error('当前酒馆缺少原生提示编译接口');
++  const original = manager.setChatCompletion;
++  manager.setChatCompletion = function (completion) {
++    // Snapshot before ST squashes system messages, while source groups exist.
++    if (isEnabled() && !isRunning()) latest = captureNativeCompletion(completion);
++    return original.call(this, completion);
++  };
++  const ctx = getSTContext();
++  if (ctx.eventTypes.WORLDINFO_SCAN_DONE) ctx.eventSource.on(ctx.eventTypes.WORLDINFO_SCAN_DONE, args => {
++    if (!isEnabled()) return;
++    // Native scanning may run before prompt compilation. Do not let any WI
++    // position (including depth, examples and author's note) enter this run.
++    args.activated?.entries?.clear();
++    if (args.activated) args.activated.text = '';
++  });
++  installed = true;
++}
++
++export function takeNativePromptSnapshot(ctx = getSTContext()) {
++  const snapshot = latest;
++  latest = null;
++  return snapshot?.chat === ctx.chat ? snapshot : null;
++}
++
++export function hasNativeWriter() { return !!getGenerationSession()?.snapshot; }
++
++export function buildNativeWritingMessages(writing) {
++  const run = getGenerationSession();
++  run.assertActive();
++  const snapshot = run.snapshot;
++  if (!snapshot) throw new Error('本轮原生提示快照不可用');
++  const recent = writing.recentTurns || writing.recentNarratives || [];
++  const recentNumbers = new Set(recent.map(t => t.turnNum));
++  const store = run.orchestrator.summaryStore;
++  const summaries = store.getEntryCount() === 0 ? '' : store.getAllSummaries();
++  const summarized = new Set([...summaries.matchAll(/\[第(\d+)轮\]/g)].map(m => Number(m[1])));
++  const discard = new Set();
++  for (const turn of run.turns || []) {
++    if (recentNumbers.has(turn.turnNum) || !summarized.has(turn.turnNum)) continue;
++    discard.add(turn.chatIndex);
++    // Keep unsummarized messages and unmatched native injections verbatim.
++    const user = snapshot.raw.slice(0, turn.chatIndex).findLast(m => m.role === 'user' && !m.is_system);
++    if (user) discard.add(user.index);
++  }
++  let insertedMemory = false;
++  const messages = [];
++  for (const node of snapshot.nodes) {
++    if (node.path.includes('worldInfoBefore') || node.path.includes('worldInfoAfter') || /^worldInfo/.test(node.identifier)) continue;
++    const inHistory = node.path.includes('chatHistory');
++    if (inHistory && !insertedMemory && summaries) {
++      messages.push({ role: 'system', content: `<story_summary>\n${summaries}\n</story_summary>` });
++      insertedMemory = true;
++    }
++    if (inHistory && discard.has(node.sourceIndex)) continue;
++    const message = clone(node.message);
++    if (inHistory && node.sourceIndex != null && message.role === 'assistant') {
++      const source = snapshot.raw[node.sourceIndex];
++      const plainSource = withoutSummaryFooter(source.mes, source.owned);
++      if (plainSource !== null && typeof message.content === 'string' && message.content.includes(source.mes)) {
++        // Preserve a user-enabled native reasoning prefix around our envelope.
++        message.content = message.content.replace(source.mes, plainSource);
++      } else {
++        const body = withoutSummaryFooter(contentText(message.content), source.owned);
++        if (body !== null && typeof message.content === 'string') message.content = body;
++      }
++    }
++    messages.push(message);
++  }
++  if (writing.textRecall) {
++    const text = typeof writing.textRecall === 'string' ? writing.textRecall : JSON.stringify(writing.textRecall);
++    // Recall is factual context, not a new writing guide or tone instruction.
++    const position = messages.findLastIndex(m => m.role === 'user');
++    messages.splice(position < 0 ? messages.length : position, 0, { role: 'system', content: `<text_recall>\n${text}\n</text_recall>` });
++  }
++  if (!messages.length) throw new Error('酒馆本轮没有可用的聊天提示');
++  run.promptAudit = {
++    nativeMessages: snapshot.nodes.length, writerMessages: messages.length,
++    removedHistoryMessages: snapshot.nodes.filter(n => n.path.includes('chatHistory') && discard.has(n.sourceIndex)).length,
++  };
++  return messages;
++}
+--- /dev/null
++++ b/response-adapter.js
+@@ -0,0 +1,61 @@
++// Use the same request and cleanup as generateRaw, retaining actual writer metadata.
++import { getSTContext } from './utils.js';
++
++let nativePromise;
++async function nativeHelpers() {
++  if (!nativePromise) nativePromise = Promise.all([
++    import(new URL('../../../../script.js', import.meta.url).href),
++    import(new URL('../../../reasoning.js', import.meta.url).href),
++    import(new URL('../../regex/engine.js', import.meta.url).href),
++  ]).then(([script, reasoning, regex]) => ({ ...script, ...reasoning, ...regex }));
++  return await nativePromise;
++}
++
++export async function getWriterResponse(messages, helpers = null) {
++  const ctx = getSTContext();
++  const started = Date.now();
++  if (typeof ctx?.generateRawData !== 'function') {
++    // Older ST: keep the supported raw path. Never reuse relay reasoning.
++    return { text: await ctx.generateRaw({ prompt: messages }), reasoning: '', signature: null, usage: null, started, finished: Date.now() };
++  }
++  const native = helpers ?? await nativeHelpers();
++  const data = await ctx.generateRawData({ prompt: messages });
++  let text = native.cleanUpMessage({
++    getMessage: native.extractMessageFromData(data),
++    isImpersonate: false, isContinue: false, displayIncompleteSentences: true,
++    includeUserPromptBias: false, trimNames: true, trimWrongNames: true,
++  });
++  let reasoning = native.extractReasoningFromData(data);
++  if (ctx.powerUserSettings?.reasoning?.auto_parse) {
++    const parsed = (ctx.parseReasoningFromString ?? native.parseReasoningFromString)(text);
++    if (parsed?.reasoning) {
++      text = parsed.content;
++      reasoning = [reasoning, parsed.reasoning].filter(Boolean).join('\n\n');
++    }
++  }
++  if (reasoning && native.getRegexedString && native.regex_placement) {
++    reasoning = native.getRegexedString(reasoning, native.regex_placement.REASONING);
++  }
++  if (ctx.powerUserSettings?.trim_spaces) reasoning = reasoning.trim();
++  return {
++    text, reasoning: reasoning || '',
++    signature: native.extractReasoningSignatureFromData?.(data) ?? null,
++    usage: data?.usage ?? data?.usageMetadata ?? null,
++    started, finished: Date.now(),
++  };
++}
++
++export function replaceWriterMetadata(message, response, ctx = getSTContext()) {
++  message.extra ??= {};
++  for (const key of ['reasoning', 'reasoning_display_text', 'reasoning_duration', 'reasoning_signature', 'token_count', 'time_to_first_token']) delete message.extra[key];
++  message.extra.reasoning = response.reasoning || '';
++  if (response.signature) message.extra.reasoning_signature = response.signature;
++  message.extra.save_writer_usage = response.usage ?? null;
++  message.gen_started = new Date(response.started).toISOString();
++  message.gen_finished = new Date(response.finished).toISOString();
++  // The raw endpoint returns no separate reasoning clock. Do not invent one.
++  if (ctx?.getTokenCount && typeof response.text === 'string') {
++    // Native token count remains unknown until calculated for the actual body.
++    message.extra.save_response_received = true;
++  }
++}
+--- /dev/null
++++ b/generation-session.js
+@@ -0,0 +1,69 @@
++// Request lifetime and response ownership. No prompts or model settings here.
++let active = null;
++
++export function getGenerationSession() { return active; }
++
++export function startGenerationSession(run) {
++  if (active) throw new Error('A Save generation is already running');
++  run.controller = new AbortController();
++  run.requests = [];
++  run.writer = null;
++  run.assertActive = () => {
++    if (run.controller.signal.aborted || !run.isCurrent()) throw new Error('Pipeline cancelled');
++  };
++  run.cancel = (reason = '已停止') => {
++    if (run.controller.signal.aborted) return;
++    run.cancelReason = reason;
++    run.controller.abort();
++    run.orchestrator._shouldCancel = true;
++    // Native raw requests listen to GENERATION_STOPPED as well.
++    try { run.context.stopGeneration?.(); } catch { /* already stopped */ }
++  };
++  active = run;
++  return run;
++}
++
++export function endGenerationSession(run) {
++  if (active === run) active = null;
++}
++
++export async function awaitRequest(operation, label) {
++  const run = active;
++  if (!run) return await operation();
++  run.assertActive();
++  const entry = { label, started: Date.now(), status: 'pending' };
++  run.requests.push(entry);
++  run.onStatus?.(label === 'writing' || label === 'merged-writing' ? '正在生成回复' : '正在整理记忆');
++  let timer;
++  let abortHandler;
++  const aborted = new Promise((_, reject) => {
++    abortHandler = () => reject(new Error('Pipeline cancelled'));
++    run.controller.signal.addEventListener('abort', abortHandler, { once: true });
++    timer = setTimeout(() => run.cancel('请求等待超过 5 分钟，已停止'), run.requestTimeout ?? 300000);
++  });
++  try {
++    const result = await Promise.race([Promise.resolve().then(operation), aborted]);
++    run.assertActive();
++    entry.status = 'complete';
++    return result;
++  } catch (error) {
++    entry.status = run.controller.signal.aborted ? 'stopped' : 'error';
++    entry.error = error?.message || String(error);
++    throw error;
++  } finally {
++    clearTimeout(timer);
++    run.controller.signal.removeEventListener('abort', abortHandler);
++    entry.elapsedMs = Date.now() - entry.started;
++  }
++}
++
++export function publishWriter(response) {
++  const run = active;
++  if (!run) return;
++  run.assertActive();
++  run.writer = response;
++  const request = run.requests.at(-1);
++  if (request) request.usage = response.usage ?? null;
++  const accepted = run.onWriter?.(response);
++  return typeof accepted === 'string' ? accepted : response.text;
++}
 --- /dev/null
 +++ b/save-custom.js
 @@ -0,0 +1,108 @@
@@ -215,16 +2068,16 @@
 +  return (value >>> 0).toString(16);
 +}
 +
-+export function withoutSummaryFooter(raw) {
++export function withoutSummaryFooter(raw, allowBodyOnly = false) {
 +  if (typeof raw !== 'string') return null;
 +  const opening = /^\s*<context>\s*\n?/i.exec(raw);
 +  const close = raw.toLowerCase().lastIndexOf('</context>');
 +  if (!opening || close < opening[0].length) return null;
 +  const tail = raw.slice(close + '</context>'.length);
 +  const footer = /^\s*<summary>[\s\S]*?<\/summary>/i.exec(tail);
-+  if (!footer) return null;
++  if (!footer && (!allowBodyOnly || tail.trim())) return null;
 +  const narrative = raw.slice(opening[0].length, close).trim();
-+  const after = tail.slice(footer[0].length).trim();
++  const after = footer ? tail.slice(footer[0].length).trim() : '';
 +  return [narrative, after].filter(Boolean).join('\n\n');
 +}
 +
@@ -241,7 +2094,7 @@
 +    return false;
 +  }
 +
-+  const preview = withoutSummaryFooter(message.mes);
++  const preview = withoutSummaryFooter(message.mes, extra?.save_native_writer === 1);
 +  if (preview === null) {
 +    if (!ownsDisplay) return false;
 +    delete extra.display_text;

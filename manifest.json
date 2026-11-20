@@ -1,11 +1,15 @@
 {
-    "display_name": "Save · 原版请求对齐版",
-    "id": "save-original-minimal",
-    "api": 2,
-    "version": "0.4.1",
-    "description": "原版请求流程：隐藏末尾三项，不读世界书，不额外注入角色卡，独立启用开关。",
-    "author": "Lol1p0p；按 Yu 的需求定制",
-    "tags": ["agent", "narrative", "pipeline"],
-    "js": "index.js",
-    "css": "style.css"
+  "display_name": "Save",
+  "id": "save-original-minimal",
+  "api": 2,
+  "version": "0.5.0",
+  "description": "原版请求流程：隐藏末尾三项，不读世界书，不额外注入角色卡，独立启用开关。",
+  "author": "Lol1p0p；按 Yu 的需求定制",
+  "tags": [
+    "agent",
+    "narrative",
+    "pipeline"
+  ],
+  "js": "index.js",
+  "css": "style.css"
 }

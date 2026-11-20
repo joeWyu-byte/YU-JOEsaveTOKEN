@@ -1,7 +1,9 @@
 import { callLLM } from "./llm.js";
 import { WRITING_SYSTEM_SUFFIX, MERGED_WRITING_SYSTEM_SUFFIX } from "./constants.js";
+import { hasNativeWriter, buildNativeWritingMessages } from './native-chat.js';
 
 export async function runWritingAgent(ctx) {
+  if (hasNativeWriter()) return (await callLLM(buildNativeWritingMessages(ctx), { label: 'writing' })).trim();
   const guide = ctx.writingGuide;
   const hasToolResults = ctx.toolResultsText && ctx.toolResultsText.length > 0;
 
@@ -84,6 +86,7 @@ export async function runWritingAgent(ctx) {
 }
 
 export async function runMergedWritingAgent(ctx) {
+  if (hasNativeWriter()) return (await callLLM(buildNativeWritingMessages(ctx), { label: 'merged-writing' })).trim();
   let systemContent = "";
 
   if (ctx.presetContext) {

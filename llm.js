@@ -1,4 +1,6 @@
 import { getSTContext } from "./utils.js";
+import { awaitRequest, getGenerationSession, publishWriter } from './generation-session.js';
+import { getWriterResponse } from './response-adapter.js';
 
 let llmCallCount = 0;
 
@@ -14,15 +16,20 @@ export async function callLLM(messages, options) {
       console.log(`[LLMClient] ${label} \u8c03\u7528, messages \u6570\u91cf:`, messages.length);
       const ctx = getSTContext();
       if (!ctx) throw new Error("SillyTavern context not available");
-      const result = await ctx.generateRaw({ prompt: messages });
-      const text = extractText(result);
+      const isWriter = label === 'writing' || label === 'merged-writing';
+      const result = await awaitRequest(() => isWriter
+        ? getWriterResponse(messages)
+        : ctx.generateRaw({ prompt: messages }), label);
+      const text = isWriter ? result.text : extractText(result);
       if (!text || (typeof text === "string" && text.trim().length === 0)) {
         throw new Error("[LLMClient] generateRaw \u8fd4\u56de\u7a7a\u5185\u5bb9\uff0c\u8bf7\u6c42\u53ef\u80fd\u88ab\u53d6\u6d88\u6216API\u9519\u8bef");
       }
       console.log(`[LLMClient] ${label} \u8fd4\u56de, \u957f\u5ea6:`, text.length);
+      if (isWriter) return publishWriter(result) ?? text;
       return text;
     } catch (err) {
       lastErr = err;
+      getGenerationSession()?.assertActive();
       if (isAbortError(err)) throw new Error("Pipeline cancelled");
       if (!isRetryable(err)) break;
     }

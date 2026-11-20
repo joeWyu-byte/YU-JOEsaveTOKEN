@@ -4,6 +4,7 @@ import { callLLM } from "./llm.js";
 import { runPlanningAgent } from "./agent-planning.js";
 import { runWritingAgent, runMergedWritingAgent } from "./agent-writing.js";
 import { runMergedAnalysisAgent } from "./agent-analysis.js";
+import { getGenerationSession } from './generation-session.js';
 import { getMvuStateSummary } from "./mvu.js";
 import { rollDice } from "./dice.js";
 import { parseTextToVariables, isApiFailure } from "./utils.js";
@@ -221,6 +222,7 @@ export class Orchestrator {
     this._chat = chat;
 
     let turnId;
+    try {
     if (isRegeneration) {
       turnId = `turn_${String(this.turnCounter).padStart(3, "0")}`;
       await this._rollbackToCheckpoint(turnId);
@@ -237,7 +239,6 @@ export class Orchestrator {
       await this._analyzeTurn0();
     }
 
-    try {
       const result = await this._fullPipeline(userInput, turnId);
       if (!isRegeneration) this.turnCounter++;
       this._mvuInitialized = true;
@@ -251,6 +252,9 @@ export class Orchestrator {
         await this._rollbackToCheckpoint(turnId);
         return { narrative: "⚠️ 生成已中断", formatted: null, events: { applied: 0, rejected: 0 }, writingGuide: {}, finalOutput: "⚠️ 生成已中断", codeToolResults: [] };
       }
+      // Never generate another body because summary/checkpoint persistence failed.
+      if (getGenerationSession()?.writer) throw error;
+      if (/PROHIBITED_CONTENT|SAFETY|CONTENT_FILTER|\b(?:401|403)\b/i.test(error.message || '')) throw error;
       console.error("[NarrativeAgent] Pipeline error:", error);
       if (isApiFailure(error)) {
         this._reportProgress("API请求失败，尝试降级处理...");

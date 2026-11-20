@@ -8,6 +8,7 @@ import { SillyTavernBridge } from "./bridge.js";
 import { loadOrCreateState, loadOrCreateSummary, persistState } from "./settings.js";
 import { loadConfig, saveConfig } from "./settings-custom.js";
 import { getSTContext, getConversationId, deepMerge } from "./utils.js";
+import { installNativePromptCapture } from './native-chat.js';
 
 let orchestrator = null;
 let bridge = null;
@@ -33,6 +34,15 @@ async function initExtension() {
 
   bridge = new SillyTavernBridge(orchestrator);
   bridge.enabled = config.enabled;
+  let compatibilityError = null;
+  try {
+    await installNativePromptCapture(() => bridge.enabled, () => bridge.isPipelineRunning);
+  } catch (error) {
+    compatibilityError = error;
+    config.enabled = false;
+    bridge.enabled = false;
+    console.error('[Save] Native prompt adapter unavailable:', error);
+  }
   bridge.onPipelineComplete(() => { persistState(orchestrator, config, currentChatId); refreshStateDisplay(); });
   if (config.enabled) await worldInfoResolver.buildFormattingSet();
   bridge.install();
@@ -42,6 +52,7 @@ async function initExtension() {
   installChatDeleteHandler();
 
   await registerSettingsPane();
+  if (compatibilityError) bridge.status('当前酒馆的原生提示接口不可用，已保留原生生成；请检查酒馆版本', true);
   console.log("[NarrativeAgent] Initialization complete, enabled:", config.enabled);
 }
 
@@ -59,23 +70,8 @@ function installChatChangeHandler() {
       return;
     }
 
-    bridge._aborted = true;
-
-    if (orchestrator._isRunning) {
-      console.log("[NarrativeAgent] Chat changed, 正在终止运行中的pipeline...");
-      orchestrator._shouldCancel = true;
-      const startTime = Date.now();
-      while (orchestrator._isRunning && Date.now() - startTime < 30000) {
-        await new Promise(r => setTimeout(r, 100));
-      }
-      if (orchestrator._isRunning) {
-        console.warn("[NarrativeAgent] Pipeline终止超时，强制继续切换");
-        orchestrator._isRunning = false;
-        orchestrator._shouldCancel = true;
-      } else {
-        console.log("[NarrativeAgent] Pipeline已终止");
-      }
-    }
+    bridge.cancel('已切换聊天');
+    await bridge.waitForIdle();
 
     console.log("[NarrativeAgent] Chat changed, saving current state for:", currentChatId);
     persistState(orchestrator, config, currentChatId);
@@ -121,6 +117,7 @@ async function registerSettingsPane() {
       const newEnabled = $(this).prop("checked");
 
       if (config.enabled && !newEnabled) {
+        bridge?.cancel('插件已关闭');
         persistState(orchestrator, config, currentChatId);
       }
 
@@ -250,6 +247,12 @@ async function registerSettingsPane() {
 
     $html.find("#na_open_tutorial").on("click", function () {
       window.open(new URL('./TUTORIAL.html', import.meta.url).href, "_blank");
+    });
+
+    $html.find('#save_export_run').on('click', function () {
+      const blob = new Blob([JSON.stringify(bridge?.lastRun ?? { status: bridge?.lastStatus || '尚无执行记录' }, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = 'save-run-log.json'; a.click(); URL.revokeObjectURL(url);
     });
 
     $("#extensions_settings").append($html);
